@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -99,6 +100,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="default",
         help="Default org_id for --facilities-geojson (default: 'default').",
     )
+    serve_http_parser.add_argument(
+        "--require-auth",
+        action="store_true",
+        help="Require SPATIALGRID_API_KEYS env var (JSON token->org_id map) to be configured.",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark",
@@ -193,7 +199,9 @@ def _run_demo() -> dict[str, Any]:
     }
 
 
-def _create_index_from_args(args: argparse.Namespace) -> tuple[SpatialIndex, bool]:
+def _create_index_from_args(
+    args: argparse.Namespace,
+) -> tuple[SpatialIndex, bool, SQLiteFacilityStore | None]:
     """Initialize SpatialIndex (with optional snapshot/SQLite store) and load startup facilities."""
     state_path: Path | None = getattr(args, "state_file", None)
     db_path: Path | None = getattr(args, "db_path", None)
@@ -218,7 +226,24 @@ def _create_index_from_args(args: argparse.Namespace) -> tuple[SpatialIndex, boo
         index.add_facilities(facilities)
         added_facilities = True
 
-    return index, added_facilities
+    return index, added_facilities, store
+
+
+def _load_api_keys_from_env(require_auth: bool) -> dict[str, str] | None:
+    """Load Bearer token -> org_id mapping from SPATIALGRID_API_KEYS env var."""
+    raw = os.environ.get("SPATIALGRID_API_KEYS", "").strip()
+    if not raw:
+        if require_auth:
+            raise ValueError(
+                "SPATIALGRID_API_KEYS environment variable must be set when --require-auth is used."
+            )
+        return None
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()
+    ):
+        raise ValueError("SPATIALGRID_API_KEYS must be a JSON object mapping token -> org_id.")
+    return parsed
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -227,18 +252,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "serve":
-        index, added_facilities = _create_index_from_args(args)
+        index, added_facilities, store = _create_index_from_args(args)
         state_path: Path | None = args.state_file
         if state_path is not None and added_facilities:
             index.save_snapshot(state_path)
 
-        server = create_mcp_server(index=index, seed_demo=False)
-        server.run()
+        try:
+            server = create_mcp_server(index=index, seed_demo=False)
+            server.run()
+        finally:
+            if store is not None:
+                store.close()
         return 0
 
     if args.command == "serve-http":
-        index, _ = _create_index_from_args(args)
-        app = create_http_app(index=index)
+        index, _, store = _create_index_from_args(args)
+        api_keys = _load_api_keys_from_env(require_auth=bool(args.require_auth))
+        app = create_http_app(
+            index=index,
+            api_keys=api_keys,
+            on_shutdown=store.close if store is not None else None,
+        )
         uvicorn.run(app, host=str(args.host), port=int(args.port))
         return 0
 

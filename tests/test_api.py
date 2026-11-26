@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from starlette.testclient import TestClient
 
 from spatialgrid.api import create_http_app
+from spatialgrid.cli import _load_api_keys_from_env
 from spatialgrid.index import SpatialIndex, generate_synthetic_facilities
 
 
@@ -206,3 +208,60 @@ def test_validation_error_and_missing_depot_and_invalid_json() -> None:
         headers={"Content-Type": "application/json"},
     )
     assert bad_json.status_code == 400
+
+
+def test_list_delete_facilities_request_id_and_payload_limit() -> None:
+    app = create_http_app(api_keys={"tok-acme": "acme"}, max_body_bytes=128)
+    client = TestClient(app)
+
+    # Oversized body -> 413 PayloadTooLarge
+    oversized = client.post(
+        "/v1/facilities/ingest",
+        json={"org_id": "acme", "geojson": _sample_geojson()},
+        headers={"Authorization": "Bearer tok-acme", "X-Request-ID": "req-oversize"},
+    )
+    assert oversized.status_code == 413
+    assert oversized.headers["x-request-id"] == "req-oversize"
+
+    # Seed directly into a fresh app with normal limit to test GET/DELETE
+    index = SpatialIndex()
+    index.add_facilities(generate_synthetic_facilities("acme", count=3, seed=42))
+    client2 = TestClient(create_http_app(index=index, api_keys={"tok-acme": "acme"}))
+
+    list_resp = client2.get("/v1/facilities", headers={"Authorization": "Bearer tok-acme"})
+    assert list_resp.status_code == 200
+    facilities = list_resp.json()["facilities"]
+    assert len(facilities) == 3
+    assert "x-request-id" in list_resp.headers
+
+    # Cross-tenant list -> 403
+    cross_list = client2.get(
+        "/v1/facilities?org_id=other",
+        headers={"Authorization": "Bearer tok-acme"},
+    )
+    assert cross_list.status_code == 403
+
+    # Delete existing -> 200; delete again -> 404
+    fid = facilities[0]["facility_id"]
+    del_resp = client2.delete(
+        f"/v1/facilities/{fid}",
+        headers={"Authorization": "Bearer tok-acme"},
+    )
+    assert del_resp.status_code == 200
+    assert del_resp.json()["removed"] is True
+
+    del_missing = client2.delete(
+        f"/v1/facilities/{fid}",
+        headers={"Authorization": "Bearer tok-acme"},
+    )
+    assert del_missing.status_code == 404
+
+
+def test_load_api_keys_from_env_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SPATIALGRID_API_KEYS", raising=False)
+    assert _load_api_keys_from_env(require_auth=False) is None
+    with pytest.raises(ValueError, match="SPATIALGRID_API_KEYS"):
+        _load_api_keys_from_env(require_auth=True)
+
+    monkeypatch.setenv("SPATIALGRID_API_KEYS", '{"tok-1": "org-1"}')
+    assert _load_api_keys_from_env(require_auth=True) == {"tok-1": "org-1"}
