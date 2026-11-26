@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class GeoPoint(BaseModel):
@@ -36,7 +36,23 @@ class DemandNode(BaseModel):
     location: GeoPoint
     demand_units: int = Field(..., ge=0)
     priority: int = Field(default=1, ge=1, le=10)
+    time_window_start_min: int | None = Field(default=None, ge=0)
+    time_window_end_min: int | None = Field(default=None, ge=0)
+    service_time_min: int = Field(default=0, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_time_window(self) -> DemandNode:
+        if (
+            self.time_window_start_min is not None
+            and self.time_window_end_min is not None
+            and self.time_window_start_min > self.time_window_end_min
+        ):
+            raise ValueError(
+                f"time_window_start_min ({self.time_window_start_min}) must be <= "
+                f"time_window_end_min ({self.time_window_end_min})"
+            )
+        return self
 
 
 class VehicleSpec(BaseModel):
@@ -45,6 +61,8 @@ class VehicleSpec(BaseModel):
     vehicle_id: str = Field(..., min_length=1, max_length=128)
     capacity: int = Field(..., gt=0)
     max_distance_km: float | None = Field(default=None, gt=0.0)
+    avg_speed_kmh: float = Field(default=40.0, gt=0.0)
+    max_duration_min: int | None = Field(default=None, gt=0)
 
 
 class NearestFacilitiesRequest(BaseModel):
@@ -145,6 +163,7 @@ class RouteStop(BaseModel):
     demand_units: int = Field(..., ge=0)
     cumulative_load: int = Field(..., ge=0)
     cumulative_distance_km: float = Field(..., ge=0.0)
+    arrival_time_min: int | None = Field(default=None, ge=0)
 
 
 class VehicleRoute(BaseModel):

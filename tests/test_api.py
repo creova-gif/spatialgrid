@@ -265,3 +265,84 @@ def test_load_api_keys_from_env_fail_closed(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setenv("SPATIALGRID_API_KEYS", '{"tok-1": "org-1"}')
     assert _load_api_keys_from_env(require_auth=True) == {"tok-1": "org-1"}
+
+
+def test_readyz() -> None:
+    empty_client = TestClient(create_http_app())
+    empty_resp = empty_client.get("/readyz")
+    assert empty_resp.status_code == 200
+    assert empty_resp.json() == {"status": "ready", "orgs_indexed": 0}
+
+    index = SpatialIndex()
+    index.add_facilities(generate_synthetic_facilities("org-a", count=2, seed=1))
+    index.add_facilities(generate_synthetic_facilities("org-b", count=2, seed=2))
+    seeded_client = TestClient(create_http_app(index=index))
+    seeded_resp = seeded_client.get("/readyz")
+    assert seeded_resp.status_code == 200
+    assert seeded_resp.json() == {"status": "ready", "orgs_indexed": 2}
+
+
+def test_rate_limit_rpm_enforced() -> None:
+    index = SpatialIndex()
+    index.add_facilities(generate_synthetic_facilities("acme", count=2, seed=42))
+    client = TestClient(
+        create_http_app(index=index, api_keys={"tok-acme": "acme"}, rate_limit_rpm=2)
+    )
+    headers = {"Authorization": "Bearer tok-acme"}
+
+    resp1 = client.get("/v1/facilities", headers=headers)
+    assert resp1.status_code == 200
+
+    resp2 = client.get("/v1/facilities", headers=headers)
+    assert resp2.status_code == 200
+
+    resp3 = client.get("/v1/facilities", headers=headers)
+    assert resp3.status_code == 429
+    assert resp3.headers.get("retry-after") == "60"
+
+    # Probes (/healthz, /readyz) are not rate limited
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/readyz").status_code == 200
+
+
+def test_dispatch_optimize_geojson_format() -> None:
+    client = TestClient(create_http_app())
+    ingest_resp = client.post(
+        "/v1/facilities/ingest",
+        json={"org_id": "acme", "geojson": _sample_geojson()},
+    )
+    assert ingest_resp.status_code == 200
+
+    stops = [
+        {
+            "demand_id": "stop-1",
+            "org_id": "acme",
+            "location": {"lat": 41.8850, "lon": -87.6350},
+            "demand_units": 10,
+            "priority": 1,
+        },
+        {
+            "demand_id": "stop-2",
+            "org_id": "acme",
+            "location": {"lat": 41.8950, "lon": -87.6450},
+            "demand_units": 15,
+            "priority": 2,
+        },
+    ]
+
+    resp = client.post(
+        "/v1/dispatch/optimize?format=geojson",
+        json={
+            "org_id": "acme",
+            "depot_facility_id": "acme-depot-1",
+            "vehicles": [{"vehicle_id": "veh-1", "capacity": 50}],
+            "stops": stops,
+            "time_limit_seconds": 5,
+        },
+    )
+    assert resp.status_code == 200
+    geojson = resp.json()
+    assert geojson["type"] == "FeatureCollection"
+    geom_types = {feature["geometry"]["type"] for feature in geojson["features"]}
+    assert "LineString" in geom_types
+    assert "Point" in geom_types

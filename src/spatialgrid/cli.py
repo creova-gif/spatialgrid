@@ -105,6 +105,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Require SPATIALGRID_API_KEYS env var (JSON token->org_id map) to be configured.",
     )
+    serve_http_parser.add_argument(
+        "--rate-limit-rpm",
+        type=int,
+        default=None,
+        help="Optional per-org requests-per-minute limit for /v1/* endpoints.",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark",
@@ -271,6 +277,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         app = create_http_app(
             index=index,
             api_keys=api_keys,
+            rate_limit_rpm=args.rate_limit_rpm,
             on_shutdown=store.close if store is not None else None,
         )
         uvicorn.run(app, host=str(args.host), port=int(args.port))

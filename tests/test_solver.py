@@ -21,6 +21,7 @@ from spatialgrid.solver import (
     naive_llm_guess_dispatch,
     nearest_neighbor_heuristic,
     optimize_dispatch,
+    routes_to_geojson,
     validate_dispatch_solution,
 )
 
@@ -310,3 +311,142 @@ def test_optimize_dispatch_rejects_duplicate_demand_id() -> None:
             vehicles=[VehicleSpec(vehicle_id="veh-1", capacity=10)],
             stops=stops,
         )
+
+
+def test_demand_node_rejects_inverted_time_window() -> None:
+    with pytest.raises(ValidationError, match="time_window_start_min"):
+        DemandNode(
+            demand_id="bad-tw",
+            org_id="org-1",
+            location=GeoPoint(lat=37.78, lon=-122.41),
+            demand_units=2,
+            time_window_start_min=60,
+            time_window_end_min=30,
+        )
+
+
+def test_optimize_dispatch_respects_time_windows() -> None:
+    depot = _make_depot()
+    stops = [
+        DemandNode(
+            demand_id="early-stop",
+            org_id="org-1",
+            location=GeoPoint(lat=37.7849, lon=-122.4094),  # ~1.4 km from depot
+            demand_units=2,
+            time_window_start_min=0,
+            time_window_end_min=30,
+            service_time_min=10,
+        ),
+        DemandNode(
+            demand_id="late-stop",
+            org_id="org-1",
+            location=GeoPoint(lat=37.8715, lon=-122.2730),  # Berkeley, ~16.8 km
+            demand_units=3,
+            time_window_start_min=30,
+            time_window_end_min=120,
+            service_time_min=5,
+        ),
+    ]
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=[VehicleSpec(vehicle_id="veh-1", capacity=10, avg_speed_kmh=40.0)],
+        stops=stops,
+        time_limit_seconds=3,
+    )
+
+    response = optimize_dispatch(request, depot)
+    assert response.geometrically_valid is True
+    assert response.capacity_valid is True
+    assert len(response.routes) == 1
+
+    route_stops = {s.demand_id: s for s in response.routes[0].stops}
+    early = route_stops["early-stop"]
+    late = route_stops["late-stop"]
+    assert early.arrival_time_min is not None
+    assert 0 <= early.arrival_time_min <= 30
+    assert late.arrival_time_min is not None
+    assert 30 <= late.arrival_time_min <= 120
+
+
+def test_optimize_dispatch_infeasible_time_window() -> None:
+    depot = _make_depot()
+    distant_stop = DemandNode(
+        demand_id="impossible-tw",
+        org_id="org-1",
+        location=GeoPoint(lat=37.4419, lon=-122.1430),  # Palo Alto, ~44 km (~66 min at 40 km/h)
+        demand_units=2,
+        time_window_start_min=0,
+        time_window_end_min=1,
+    )
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=[VehicleSpec(vehicle_id="veh-1", capacity=10, avg_speed_kmh=40.0)],
+        stops=[distant_stop],
+        time_limit_seconds=2,
+    )
+
+    with pytest.raises(SolverInfeasibleError):
+        optimize_dispatch(request, depot)
+
+
+def test_routes_to_geojson_structure() -> None:
+    depot = _make_depot()
+    stops = [
+        DemandNode(
+            demand_id="stop-1",
+            org_id="org-1",
+            location=GeoPoint(lat=37.7849, lon=-122.4094),
+            demand_units=2,
+            time_window_start_min=0,
+            time_window_end_min=60,
+        ),
+        DemandNode(
+            demand_id="stop-2",
+            org_id="org-1",
+            location=GeoPoint(lat=37.5630, lon=-122.3255),
+            demand_units=3,
+            time_window_start_min=10,
+            time_window_end_min=120,
+        ),
+    ]
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=[VehicleSpec(vehicle_id="veh-1", capacity=10)],
+        stops=stops,
+        time_limit_seconds=3,
+    )
+    response = optimize_dispatch(request, depot)
+    geojson = routes_to_geojson(response, depot)
+
+    assert geojson["type"] == "FeatureCollection"
+    features = geojson["features"]
+    depot_features = [f for f in features if f["properties"].get("role") == "depot"]
+    line_features = [f for f in features if f["geometry"]["type"] == "LineString"]
+    stop_features = [f for f in features if f["properties"].get("role") == "stop"]
+
+    assert len(depot_features) == 1
+    assert depot_features[0]["geometry"] == {
+        "type": "Point",
+        "coordinates": [depot.location.lon, depot.location.lat],
+    }
+
+    assert len(line_features) == len(response.routes) == 1
+    line_props = line_features[0]["properties"]
+    assert line_props["vehicle_id"] == "veh-1"
+    assert line_props["total_load"] == 5
+    assert line_props["total_distance_km"] == response.routes[0].total_distance_km
+    coords = line_features[0]["geometry"]["coordinates"]
+    assert coords[0] == [depot.location.lon, depot.location.lat]
+    assert coords[-1] == [depot.location.lon, depot.location.lat]
+    assert len(coords) == len(response.routes[0].stops) + 2
+
+    assert len(stop_features) == 2
+    for sf in stop_features:
+        assert sf["geometry"]["type"] == "Point"
+        assert sf["properties"]["vehicle_id"] == "veh-1"
+        assert sf["properties"]["demand_id"] in {"stop-1", "stop-2"}
+        assert isinstance(sf["properties"]["cumulative_load"], int)
+        assert sf["properties"]["arrival_time_min"] is not None

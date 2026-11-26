@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from typing import Literal
+from collections.abc import Callable
+from typing import Any, Literal
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
@@ -146,6 +147,59 @@ def optimize_dispatch(
             "Distance",
         )
 
+    use_time_dimension = any(
+        s.time_window_start_min is not None
+        or s.time_window_end_min is not None
+        or s.service_time_min > 0
+        for s in request.stops
+    ) or any(v.max_duration_min is not None for v in request.vehicles)
+
+    time_dimension: Any = None
+    if use_time_dimension:
+        service_times = [0, *(s.service_time_min for s in request.stops)]
+
+        def _make_time_callback(speed_kmh: float) -> Callable[[int, int], int]:
+            def time_callback(from_index: int, to_index: int) -> int:
+                from_node = int(manager.IndexToNode(from_index))
+                to_node = int(manager.IndexToNode(to_index))
+                dist_km = distance_matrix[from_node][to_node] / 1000.0
+                travel_min = int(round((dist_km / speed_kmh) * 60.0))
+                return travel_min + service_times[from_node]
+
+            return time_callback
+
+        time_callback_indices = [
+            routing.RegisterTransitCallback(_make_time_callback(v.avg_speed_kmh))
+            for v in request.vehicles
+        ]
+        max_horizon = max(
+            10_000,
+            *(s.time_window_end_min or 0 for s in request.stops),
+            *(v.max_duration_min or 0 for v in request.vehicles),
+        )
+        routing.AddDimensionWithVehicleTransits(
+            time_callback_indices,
+            1440,
+            max_horizon,
+            True,
+            "Time",
+        )
+        time_dimension = routing.GetDimensionOrDie("Time")
+
+        for i, stop in enumerate(request.stops):
+            if stop.time_window_start_min is not None or stop.time_window_end_min is not None:
+                start = stop.time_window_start_min if stop.time_window_start_min is not None else 0
+                end = (
+                    stop.time_window_end_min
+                    if stop.time_window_end_min is not None
+                    else max_horizon
+                )
+                time_dimension.CumulVar(manager.NodeToIndex(i + 1)).SetRange(start, end)
+
+        for v_idx, v in enumerate(request.vehicles):
+            if v.max_duration_min is not None:
+                time_dimension.CumulVar(routing.End(v_idx)).SetMax(v.max_duration_min)
+
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
     search_parameters.first_solution_strategy = (
         routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
@@ -175,6 +229,11 @@ def optimize_dispatch(
                 stop = request.stops[node_idx - 1]
                 cumulative_distance_km += haversine_km(prev_location, stop.location)
                 cumulative_load += stop.demand_units
+                arrival_time_min = (
+                    int(solution.Min(time_dimension.CumulVar(index)))
+                    if time_dimension is not None
+                    else None
+                )
                 route_stops.append(
                     RouteStop(
                         demand_id=stop.demand_id,
@@ -182,6 +241,7 @@ def optimize_dispatch(
                         demand_units=stop.demand_units,
                         cumulative_load=cumulative_load,
                         cumulative_distance_km=round(cumulative_distance_km, 6),
+                        arrival_time_min=arrival_time_min,
                     )
                 )
                 prev_location = stop.location
@@ -229,3 +289,69 @@ def optimize_dispatch(
         capacity_valid=capacity_valid,
         solve_time_ms=solve_time_ms,
     )
+
+
+def routes_to_geojson(
+    response: OptimizeDispatchResponse,
+    depot: Facility,
+) -> dict[str, Any]:
+    """Convert solved dispatch routes and depot into a GeoJSON FeatureCollection."""
+    depot_coord = [depot.location.lon, depot.location.lat]
+    features: list[dict[str, Any]] = [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": depot_coord,
+            },
+            "properties": {
+                "role": "depot",
+                "facility_id": depot.facility_id,
+                "name": depot.name,
+            },
+        }
+    ]
+
+    for route in response.routes:
+        line_coords = [
+            depot_coord,
+            *([stop.location.lon, stop.location.lat] for stop in route.stops),
+            depot_coord,
+        ]
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": line_coords,
+                },
+                "properties": {
+                    "role": "route",
+                    "vehicle_id": route.vehicle_id,
+                    "total_load": route.total_load,
+                    "total_distance_km": route.total_distance_km,
+                },
+            }
+        )
+        for stop in route.stops:
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [stop.location.lon, stop.location.lat],
+                    },
+                    "properties": {
+                        "role": "stop",
+                        "vehicle_id": route.vehicle_id,
+                        "demand_id": stop.demand_id,
+                        "cumulative_load": stop.cumulative_load,
+                        "arrival_time_min": stop.arrival_time_min,
+                    },
+                }
+            )
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+    }

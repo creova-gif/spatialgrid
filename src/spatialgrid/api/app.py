@@ -7,8 +7,10 @@ import json
 import logging
 import time
 import uuid
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from threading import Lock
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
@@ -30,7 +32,7 @@ from spatialgrid.models import (
     NearestFacilitiesRequest,
     OptimizeDispatchRequest,
 )
-from spatialgrid.solver import optimize_dispatch
+from spatialgrid.solver import optimize_dispatch, routes_to_geojson
 
 logger = logging.getLogger("spatialgrid.api")
 
@@ -42,6 +44,31 @@ class _IngestFacilitiesPayload(BaseModel):
 
     org_id: str = Field(..., min_length=1)
     geojson: dict[str, Any]
+
+
+class _SlidingWindowRateLimiter:
+    """Thread-safe in-memory sliding-window rate limiter keyed by org_id."""
+
+    def __init__(self, limit_rpm: int, window_seconds: float = 60.0) -> None:
+        self._limit = limit_rpm
+        self._window_seconds = window_seconds
+        self._buckets: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = Lock()
+
+    def allow(self, key: str) -> bool:
+        """Return True if the request is within the rate limit, False otherwise."""
+        if self._limit <= 0:
+            return False
+        now = time.monotonic()
+        cutoff = now - self._window_seconds
+        with self._lock:
+            timestamps = self._buckets[key]
+            while timestamps and timestamps[0] <= cutoff:
+                timestamps.popleft()
+            if len(timestamps) >= self._limit:
+                return False
+            timestamps.append(now)
+            return True
 
 
 def _authenticate_request(
@@ -157,9 +184,13 @@ def create_http_app(
     api_keys: dict[str, str] | None = None,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     on_shutdown: Callable[[], None] | None = None,
+    rate_limit_rpm: int | None = None,
 ) -> Starlette:
     """Create the SpatialGrid Starlette HTTP API application."""
     active_index = index if index is not None else SpatialIndex()
+    rate_limiter = (
+        _SlidingWindowRateLimiter(rate_limit_rpm) if rate_limit_rpm is not None else None
+    )
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
@@ -171,6 +202,12 @@ def create_http_app(
 
     async def healthz(_request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok", "service": "spatialgrid"}, status_code=200)
+
+    async def readyz(_request: Request) -> JSONResponse:
+        return JSONResponse(
+            {"status": "ready", "orgs_indexed": len(active_index.org_facility_counts())},
+            status_code=200,
+        )
 
     def _with_observability(
         handler: Callable[[Request, str | None], Awaitable[JSONResponse]],
@@ -184,6 +221,16 @@ def create_http_app(
                 if auth_err is not None:
                     auth_err.headers["x-request-id"] = request_id
                     return auth_err
+
+            if rate_limiter is not None and not rate_limiter.allow(authed_org or "anonymous"):
+                return JSONResponse(
+                    {
+                        "error": "Rate limit exceeded.",
+                        "error_type": "RateLimitExceeded",
+                    },
+                    status_code=429,
+                    headers={"Retry-After": "60", "x-request-id": request_id},
+                )
 
             response = await handler(request, authed_org)
             duration_ms = round((time.perf_counter() - start) * 1000.0, 3)
@@ -202,7 +249,7 @@ def create_http_app(
         return wrapped
 
     def _v1_post(
-        handler: Callable[[dict[str, Any]], JSONResponse],
+        handler: Callable[[dict[str, Any], Request], JSONResponse],
     ) -> Callable[[Request], Awaitable[JSONResponse]]:
         async def _inner(request: Request, authed_org: str | None) -> JSONResponse:
             payload, parse_err = await _parse_json_body(request, max_body_bytes=max_body_bytes)
@@ -217,7 +264,7 @@ def create_http_app(
                     return mismatch
 
             try:
-                return handler(payload)
+                return handler(payload, request)
             except (ValidationError, SpatialGridError) as exc:
                 return _error_response(exc)
 
@@ -259,22 +306,22 @@ def create_http_app(
             )
         return JSONResponse(result, status_code=200)
 
-    def _handle_ingest(payload: dict[str, Any]) -> JSONResponse:
+    def _handle_ingest(payload: dict[str, Any], _request: Request) -> JSONResponse:
         req = _IngestFacilitiesPayload.model_validate(payload)
         result = tool_ingest_geojson(active_index, req.org_id, req.geojson)
         return JSONResponse(result, status_code=200)
 
-    def _handle_nearest(payload: dict[str, Any]) -> JSONResponse:
+    def _handle_nearest(payload: dict[str, Any], _request: Request) -> JSONResponse:
         req = NearestFacilitiesRequest.model_validate(payload)
         result = active_index.nearest_facilities(req)
         return JSONResponse(result.model_dump(), status_code=200)
 
-    def _handle_coverage_gap(payload: dict[str, Any]) -> JSONResponse:
+    def _handle_coverage_gap(payload: dict[str, Any], _request: Request) -> JSONResponse:
         req = CoverageGapRequest.model_validate(payload)
         result = active_index.coverage_gap(req)
         return JSONResponse(result.model_dump(), status_code=200)
 
-    def _handle_optimize_dispatch(payload: dict[str, Any]) -> JSONResponse:
+    def _handle_optimize_dispatch(payload: dict[str, Any], request: Request) -> JSONResponse:
         req = OptimizeDispatchRequest.model_validate(payload)
         depot = active_index.get_facility(req.org_id, req.depot_facility_id)
         if depot is None:
@@ -289,10 +336,13 @@ def create_http_app(
                 status_code=404,
             )
         result = optimize_dispatch(req, depot)
+        if request.query_params.get("format") == "geojson":
+            return JSONResponse(routes_to_geojson(result, depot), status_code=200)
         return JSONResponse(result.model_dump(), status_code=200)
 
     routes = [
         Route("/healthz", healthz, methods=["GET"]),
+        Route("/readyz", readyz, methods=["GET"]),
         Route("/v1/facilities", _with_observability(_handle_list_facilities), methods=["GET"]),
         Route(
             "/v1/facilities/{facility_id}",
