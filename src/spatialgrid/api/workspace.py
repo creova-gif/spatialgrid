@@ -54,12 +54,17 @@ WORKSPACE_HTML = """<!DOCTYPE html>
     label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
     input, textarea, button {
       width: 100%;
+      min-height: 38px;
       padding: 7px 9px;
       border-radius: 6px;
       border: 1px solid var(--border);
       background: #0f172a;
       color: var(--text);
       font-size: 12px;
+    }
+    input:focus-visible, textarea:focus-visible, button:focus-visible {
+      outline: 2px solid #38bdf8;
+      outline-offset: 2px;
     }
     textarea { font-family: ui-monospace, monospace; min-height: 68px; resize: vertical; }
     button {
@@ -72,6 +77,20 @@ WORKSPACE_HTML = """<!DOCTYPE html>
     }
     button:hover { opacity: 0.92; }
     .secondary { background: #1e293b; color: var(--text); border: 1px solid var(--border); }
+    .kpi-bar {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+    .kpi-card {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 9px;
+    }
+    .kpi-label { font-size: 10px; color: var(--muted); text-transform: uppercase; }
+    .kpi-value { font-size: 14px; font-weight: 700; color: var(--text); margin-top: 2px; }
     pre {
       background: #020617;
       border: 1px solid var(--border);
@@ -90,7 +109,7 @@ WORKSPACE_HTML = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <aside>
+  <aside aria-label="Dispatch controls">
     <div>
       <h1>SpatialGrid Workspace</h1>
       <p class="subtitle">H3 + STRtree spatial index &amp; OR-Tools CVRP solver</p>
@@ -142,11 +161,29 @@ WORKSPACE_HTML = """<!DOCTYPE html>
       <button id="ingestBtn" type="button" class="secondary">Ingest GeoJSON</button>
     </div>
     <div class="section">
-      <label>Status &amp; Metrics</label>
-      <pre id="output">Ready. Click "Load Facilities" to inspect indexed depots.</pre>
+      <div id="kpiBar" class="kpi-bar" aria-live="polite">
+        <div class="kpi-card">
+          <div class="kpi-label">Facilities</div>
+          <div id="kpiFacilities" class="kpi-value">--</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Coverage</div>
+          <div id="kpiCoverage" class="kpi-value">--</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Total Distance</div>
+          <div id="kpiDistance" class="kpi-value">--</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Latency</div>
+          <div id="kpiLatency" class="kpi-value">--</div>
+        </div>
+      </div>
+      <label for="output">Status &amp; Metrics</label>
+      <pre id="output" aria-live="polite">Ready. Click "Load Facilities" or click map.</pre>
     </div>
   </aside>
-  <main id="map"></main>
+  <main id="map" role="application" aria-label="Interactive spatial map"></main>
   <script>
     const outputEl = document.getElementById("output");
     const orgInput = document.getElementById("orgId");
@@ -194,8 +231,33 @@ WORKSPACE_HTML = """<!DOCTYPE html>
         mapStyle: styleUrl,
         initialViewState: { longitude: -87.6298, latitude: 41.8781, zoom: 10.5 },
         controller: true,
-        layers: []
+        layers: [],
+        onClick: (info) => {
+          if (info && info.coordinate && info.coordinate.length >= 2) {
+            const [lon, lat] = info.coordinate;
+            document.getElementById("nearLat").value = lat.toFixed(5);
+            document.getElementById("nearLon").value = lon.toFixed(5);
+            outputEl.textContent =
+              "Selected map point: " + lat.toFixed(5) + ", " + lon.toFixed(5);
+          }
+        }
       });
+    }
+
+    function setKpis(opts) {
+      const k = opts || {};
+      if (k.facilities !== undefined) {
+        document.getElementById("kpiFacilities").textContent = String(k.facilities);
+      }
+      if (k.coverage !== undefined) {
+        document.getElementById("kpiCoverage").textContent = k.coverage;
+      }
+      if (k.distance !== undefined) {
+        document.getElementById("kpiDistance").textContent = k.distance;
+      }
+      if (k.latencyMs !== undefined) {
+        document.getElementById("kpiLatency").textContent = Math.round(k.latencyMs) + " ms";
+      }
     }
 
     function renderLayers(opts) {
@@ -250,10 +312,15 @@ WORKSPACE_HTML = """<!DOCTYPE html>
 
     let cachedFacilities = [];
     async function loadFacilities() {
+      const t0 = performance.now();
       const orgId = encodeURIComponent(getOrgId());
       const res = await fetch("/v1/facilities?org_id=" + orgId, { headers: authHeaders() });
       const data = await res.json();
       cachedFacilities = data.facilities || [];
+      setKpis({
+        facilities: cachedFacilities.length,
+        latencyMs: performance.now() - t0
+      });
       outputEl.textContent = JSON.stringify(
         { org_id: data.org_id, count: cachedFacilities.length },
         null,
@@ -265,6 +332,7 @@ WORKSPACE_HTML = """<!DOCTYPE html>
     document.getElementById("loadBtn").addEventListener("click", loadFacilities);
 
     document.getElementById("nearestBtn").addEventListener("click", async () => {
+      const t0 = performance.now();
       const orgId = getOrgId();
       const lat = parseFloat(document.getElementById("nearLat").value);
       const lon = parseFloat(document.getElementById("nearLon").value);
@@ -275,11 +343,13 @@ WORKSPACE_HTML = """<!DOCTYPE html>
         body: JSON.stringify({ org_id: orgId, origin: { lat, lon }, limit })
       });
       const data = await res.json();
+      setKpis({ latencyMs: performance.now() - t0 });
       outputEl.textContent = JSON.stringify(data, null, 2);
       renderLayers({ facilities: cachedFacilities, nearestMatches: data.matches || [] });
     });
 
     document.getElementById("gapBtn").addEventListener("click", async () => {
+      const t0 = performance.now();
       const orgId = getOrgId();
       const radius = parseFloat(document.getElementById("radiusKm").value) || 10.0;
       const res = await fetch("/v1/coverage-gap", {
@@ -292,6 +362,10 @@ WORKSPACE_HTML = """<!DOCTYPE html>
         })
       });
       const data = await res.json();
+      const total = data.total_demand_nodes || 0;
+      const uncovered = data.uncovered_count || 0;
+      const covPct = total > 0 ? Math.round(((total - uncovered) / total) * 100) + "%" : "--";
+      setKpis({ coverage: covPct, latencyMs: performance.now() - t0 });
       outputEl.textContent = JSON.stringify(data, null, 2);
       renderLayers({
         facilities: cachedFacilities,
@@ -300,6 +374,7 @@ WORKSPACE_HTML = """<!DOCTYPE html>
     });
 
     document.getElementById("solveBtn").addEventListener("click", async () => {
+      const t0 = performance.now();
       const orgId = getOrgId();
       if (!cachedFacilities.length) {
         outputEl.textContent = "Load facilities first.";
@@ -320,11 +395,22 @@ WORKSPACE_HTML = """<!DOCTYPE html>
         })
       });
       const geojson = await res.json();
+      let distKm = 0;
+      for (const f of geojson.features || []) {
+        if (f.properties && typeof f.properties.distance_km === "number") {
+          distKm += f.properties.distance_km;
+        }
+      }
+      setKpis({
+        distance: distKm > 0 ? distKm.toFixed(1) + " km" : "--",
+        latencyMs: performance.now() - t0
+      });
       outputEl.textContent = JSON.stringify(geojson, null, 2);
       renderLayers({ facilities: cachedFacilities, routeGeojson: geojson });
     });
 
     document.getElementById("ingestBtn").addEventListener("click", async () => {
+      const t0 = performance.now();
       const orgId = getOrgId();
       const raw = document.getElementById("ingestInput").value.trim();
       if (!raw) {
@@ -344,6 +430,7 @@ WORKSPACE_HTML = """<!DOCTYPE html>
         body: JSON.stringify({ org_id: orgId, geojson })
       });
       const data = await res.json();
+      setKpis({ latencyMs: performance.now() - t0 });
       outputEl.textContent = JSON.stringify(data, null, 2);
       if (res.ok) await loadFacilities();
     });

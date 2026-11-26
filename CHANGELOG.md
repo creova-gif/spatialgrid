@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- OpenAPI `3.1.0` specification endpoint (`GET /openapi.json`) generated from Pydantic v2 models (`spatialgrid.api.openapi`).
+- WCAG 2.1 AA accessibility landmarks (`aria-label`, `aria-live="polite"`, `:focus-visible`), KPI summary bar, and Deck.gl map click-to-query in `/workspace`.
+- Security response headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` on `/v1/*`).
+- Bounded OR-Tools solver concurrency (`max_concurrent_solves=4` via `anyio.CapacityLimiter`).
+
 ## [0.2.0] - 2026-11-26
 
 ### Added

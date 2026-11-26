@@ -17,10 +17,17 @@ import anyio
 from pydantic import BaseModel, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Route
 
 from spatialgrid.api.metrics import MetricsRegistry
+from spatialgrid.api.openapi import build_openapi_spec
 from spatialgrid.api.workspace import WORKSPACE_HTML
 from spatialgrid.exceptions import (
     InvalidGeometryError,
@@ -40,6 +47,20 @@ from spatialgrid.solver import optimize_dispatch, routes_to_geojson
 logger = logging.getLogger("spatialgrid.api")
 
 DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB
+
+
+def _apply_security_headers[TResponse: Response](
+    response: TResponse,
+    *,
+    is_api: bool = False,
+) -> TResponse:
+    """Attach standard HTTP security headers and API cache-control policy."""
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if is_api:
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 class _IngestFacilitiesPayload(BaseModel):
@@ -188,6 +209,7 @@ def create_http_app(
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     on_shutdown: Callable[[], None] | None = None,
     rate_limit_rpm: int | None = None,
+    max_concurrent_solves: int = 4,
 ) -> Starlette:
     """Create the SpatialGrid Starlette HTTP API application."""
     active_index = index if index is not None else SpatialIndex()
@@ -195,6 +217,7 @@ def create_http_app(
     rate_limiter = (
         _SlidingWindowRateLimiter(rate_limit_rpm) if rate_limit_rpm is not None else None
     )
+    solve_limiter = anyio.CapacityLimiter(max_concurrent_solves)
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
@@ -205,29 +228,50 @@ def create_http_app(
                 on_shutdown()
 
     async def healthz(_request: Request) -> JSONResponse:
-        return JSONResponse({"status": "ok", "service": "spatialgrid"}, status_code=200)
+        return _apply_security_headers(
+            JSONResponse({"status": "ok", "service": "spatialgrid"}, status_code=200),
+            is_api=False,
+        )
 
     async def root_redirect(_request: Request) -> RedirectResponse:
-        return RedirectResponse(url="/workspace", status_code=302)
+        return _apply_security_headers(
+            RedirectResponse(url="/workspace", status_code=302),
+            is_api=False,
+        )
 
     async def workspace(_request: Request) -> HTMLResponse:
-        return HTMLResponse(WORKSPACE_HTML, status_code=200)
+        return _apply_security_headers(
+            HTMLResponse(WORKSPACE_HTML, status_code=200),
+            is_api=False,
+        )
 
     async def readyz(_request: Request) -> JSONResponse:
-        return JSONResponse(
-            {"status": "ready", "orgs_indexed": len(active_index.org_facility_counts())},
-            status_code=200,
+        return _apply_security_headers(
+            JSONResponse(
+                {"status": "ready", "orgs_indexed": len(active_index.org_facility_counts())},
+                status_code=200,
+            ),
+            is_api=False,
         )
 
     async def metrics_endpoint(_request: Request) -> PlainTextResponse:
         counts = active_index.org_facility_counts()
-        return PlainTextResponse(
-            metrics.render_prometheus(
-                orgs_indexed=len(counts),
-                facilities_total=sum(counts.values()),
+        return _apply_security_headers(
+            PlainTextResponse(
+                metrics.render_prometheus(
+                    orgs_indexed=len(counts),
+                    facilities_total=sum(counts.values()),
+                ),
+                status_code=200,
+                media_type="text/plain; version=0.0.4; charset=utf-8",
             ),
-            status_code=200,
-            media_type="text/plain; version=0.0.4; charset=utf-8",
+            is_api=False,
+        )
+
+    async def openapi_endpoint(_request: Request) -> JSONResponse:
+        return _apply_security_headers(
+            JSONResponse(build_openapi_spec(), status_code=200),
+            is_api=False,
         )
 
     def _with_observability(
@@ -237,10 +281,12 @@ def create_http_app(
             request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
             start = time.perf_counter()
             authed_org: str | None = None
+            is_api_route = request.url.path.startswith("/v1/")
             if api_keys is not None:
                 authed_org, auth_err = _authenticate_request(request, api_keys)
                 if auth_err is not None:
                     auth_err.headers["x-request-id"] = request_id
+                    _apply_security_headers(auth_err, is_api=is_api_route)
                     duration_ms = round((time.perf_counter() - start) * 1000.0, 3)
                     metrics.observe_request(
                         request.method,
@@ -259,6 +305,7 @@ def create_http_app(
                     status_code=429,
                     headers={"Retry-After": "60", "x-request-id": request_id},
                 )
+                _apply_security_headers(rate_err, is_api=is_api_route)
                 duration_ms = round((time.perf_counter() - start) * 1000.0, 3)
                 metrics.observe_request(
                     request.method,
@@ -271,6 +318,7 @@ def create_http_app(
             response = await handler(request, authed_org)
             duration_ms = round((time.perf_counter() - start) * 1000.0, 3)
             response.headers["x-request-id"] = request_id
+            _apply_security_headers(response, is_api=is_api_route)
             metrics.observe_request(
                 request.method,
                 request.url.path,
@@ -292,6 +340,8 @@ def create_http_app(
 
     def _v1_post(
         handler: Callable[[dict[str, Any], Request], JSONResponse],
+        *,
+        limiter: anyio.CapacityLimiter | None = None,
     ) -> Callable[[Request], Awaitable[JSONResponse]]:
         async def _inner(request: Request, authed_org: str | None) -> JSONResponse:
             payload, parse_err = await _parse_json_body(request, max_body_bytes=max_body_bytes)
@@ -306,7 +356,12 @@ def create_http_app(
                     return mismatch
 
             try:
-                return await anyio.to_thread.run_sync(handler, payload, request)
+                return await anyio.to_thread.run_sync(
+                    handler,
+                    payload,
+                    request,
+                    limiter=limiter,
+                )
             except (ValidationError, SpatialGridError) as exc:
                 return _error_response(exc)
 
@@ -414,6 +469,7 @@ def create_http_app(
         Route("/healthz", healthz, methods=["GET"]),
         Route("/readyz", readyz, methods=["GET"]),
         Route("/metrics", metrics_endpoint, methods=["GET"]),
+        Route("/openapi.json", openapi_endpoint, methods=["GET"]),
         Route("/workspace", workspace, methods=["GET"]),
         Route("/v1/h3/summary", _with_observability(_handle_h3_summary), methods=["GET"]),
         Route("/v1/facilities", _with_observability(_handle_list_facilities), methods=["GET"]),
@@ -425,6 +481,10 @@ def create_http_app(
         Route("/v1/facilities/ingest", _v1_post(_handle_ingest), methods=["POST"]),
         Route("/v1/facilities/nearest", _v1_post(_handle_nearest), methods=["POST"]),
         Route("/v1/coverage-gap", _v1_post(_handle_coverage_gap), methods=["POST"]),
-        Route("/v1/dispatch/optimize", _v1_post(_handle_optimize_dispatch), methods=["POST"]),
+        Route(
+            "/v1/dispatch/optimize",
+            _v1_post(_handle_optimize_dispatch, limiter=solve_limiter),
+            methods=["POST"],
+        ),
     ]
     return Starlette(routes=routes, lifespan=lifespan)

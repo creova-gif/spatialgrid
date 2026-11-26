@@ -362,6 +362,10 @@ def test_workspace_html_and_example_geojson() -> None:
     assert "text/html" in ws_resp.headers["content-type"]
     assert "SpatialGrid Workspace" in ws_resp.text
     assert "deck.gl" in ws_resp.text
+    assert 'aria-live="polite"' in ws_resp.text
+    assert 'aria-label="Dispatch controls"' in ws_resp.text
+    assert ":focus-visible" in ws_resp.text
+    assert "kpiBar" in ws_resp.text
     for control_label in (
         "Load Facilities",
         "Nearest Facilities",
@@ -427,3 +431,22 @@ def test_metrics_prometheus_endpoint() -> None:
     assert "spatialgrid_http_request_duration_ms_count" in body
     assert "spatialgrid_orgs_indexed 1" in body
     assert "spatialgrid_facilities_indexed_total 2" in body
+
+
+def test_security_headers_and_openapi_spec() -> None:
+    index = SpatialIndex()
+    index.add_facilities(generate_synthetic_facilities("acme", count=2, seed=42))
+    client = TestClient(create_http_app(index=index, api_keys={"tok-acme": "acme"}))
+
+    fac_resp = client.get("/v1/facilities", headers={"Authorization": "Bearer tok-acme"})
+    assert fac_resp.status_code == 200
+    assert fac_resp.headers.get("x-content-type-options") == "nosniff"
+    assert fac_resp.headers.get("x-frame-options") == "DENY"
+    assert fac_resp.headers.get("referrer-policy") == "no-referrer"
+    assert fac_resp.headers.get("cache-control") == "no-store"
+
+    spec_resp = client.get("/openapi.json")
+    assert spec_resp.status_code == 200
+    spec = spec_resp.json()
+    assert spec.get("openapi") == "3.1.0"
+    assert "/v1/dispatch/optimize" in spec.get("paths", {})
