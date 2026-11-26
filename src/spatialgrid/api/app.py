@@ -13,12 +13,14 @@ from contextlib import asynccontextmanager
 from threading import Lock
 from typing import Any
 
+import anyio
 from pydantic import BaseModel, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Route
 
+from spatialgrid.api.metrics import MetricsRegistry
 from spatialgrid.api.workspace import WORKSPACE_HTML
 from spatialgrid.exceptions import (
     InvalidGeometryError,
@@ -189,6 +191,7 @@ def create_http_app(
 ) -> Starlette:
     """Create the SpatialGrid Starlette HTTP API application."""
     active_index = index if index is not None else SpatialIndex()
+    metrics = MetricsRegistry()
     rate_limiter = (
         _SlidingWindowRateLimiter(rate_limit_rpm) if rate_limit_rpm is not None else None
     )
@@ -216,6 +219,17 @@ def create_http_app(
             status_code=200,
         )
 
+    async def metrics_endpoint(_request: Request) -> PlainTextResponse:
+        counts = active_index.org_facility_counts()
+        return PlainTextResponse(
+            metrics.render_prometheus(
+                orgs_indexed=len(counts),
+                facilities_total=sum(counts.values()),
+            ),
+            status_code=200,
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
     def _with_observability(
         handler: Callable[[Request, str | None], Awaitable[JSONResponse]],
     ) -> Callable[[Request], Awaitable[JSONResponse]]:
@@ -227,10 +241,17 @@ def create_http_app(
                 authed_org, auth_err = _authenticate_request(request, api_keys)
                 if auth_err is not None:
                     auth_err.headers["x-request-id"] = request_id
+                    duration_ms = round((time.perf_counter() - start) * 1000.0, 3)
+                    metrics.observe_request(
+                        request.method,
+                        request.url.path,
+                        auth_err.status_code,
+                        duration_ms,
+                    )
                     return auth_err
 
             if rate_limiter is not None and not rate_limiter.allow(authed_org or "anonymous"):
-                return JSONResponse(
+                rate_err = JSONResponse(
                     {
                         "error": "Rate limit exceeded.",
                         "error_type": "RateLimitExceeded",
@@ -238,10 +259,24 @@ def create_http_app(
                     status_code=429,
                     headers={"Retry-After": "60", "x-request-id": request_id},
                 )
+                duration_ms = round((time.perf_counter() - start) * 1000.0, 3)
+                metrics.observe_request(
+                    request.method,
+                    request.url.path,
+                    rate_err.status_code,
+                    duration_ms,
+                )
+                return rate_err
 
             response = await handler(request, authed_org)
             duration_ms = round((time.perf_counter() - start) * 1000.0, 3)
             response.headers["x-request-id"] = request_id
+            metrics.observe_request(
+                request.method,
+                request.url.path,
+                response.status_code,
+                duration_ms,
+            )
             logger.info(
                 "http_request method=%s path=%s status=%d duration_ms=%.3f org_id=%s request_id=%s",
                 request.method,
@@ -271,7 +306,7 @@ def create_http_app(
                     return mismatch
 
             try:
-                return handler(payload, request)
+                return await anyio.to_thread.run_sync(handler, payload, request)
             except (ValidationError, SpatialGridError) as exc:
                 return _error_response(exc)
 
@@ -378,6 +413,7 @@ def create_http_app(
         Route("/", root_redirect, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
         Route("/readyz", readyz, methods=["GET"]),
+        Route("/metrics", metrics_endpoint, methods=["GET"]),
         Route("/workspace", workspace, methods=["GET"]),
         Route("/v1/h3/summary", _with_observability(_handle_h3_summary), methods=["GET"]),
         Route("/v1/facilities", _with_observability(_handle_list_facilities), methods=["GET"]),

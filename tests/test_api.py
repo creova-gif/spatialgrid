@@ -397,3 +397,33 @@ def test_h3_summary_aggregation_and_tenant_isolation() -> None:
         headers={"Authorization": "Bearer tok-acme"},
     )
     assert cross_resp.status_code == 403
+
+
+def test_metrics_prometheus_endpoint() -> None:
+    client = TestClient(create_http_app())
+
+    ingest_resp = client.post(
+        "/v1/facilities/ingest",
+        json={"org_id": "acme", "geojson": _sample_geojson()},
+    )
+    assert ingest_resp.status_code == 200
+
+    nearest_resp = client.post(
+        "/v1/facilities/nearest",
+        json={
+            "org_id": "acme",
+            "origin": {"lat": 41.8781, "lon": -87.6298},
+            "limit": 1,
+        },
+    )
+    assert nearest_resp.status_code == 200
+
+    metrics_resp = client.get("/metrics")
+    assert metrics_resp.status_code == 200
+    assert "text/plain" in metrics_resp.headers["content-type"]
+    body = metrics_resp.text
+    assert "spatialgrid_http_requests_total" in body
+    assert "spatialgrid_http_request_duration_ms_sum" in body
+    assert "spatialgrid_http_request_duration_ms_count" in body
+    assert "spatialgrid_orgs_indexed 1" in body
+    assert "spatialgrid_facilities_indexed_total 2" in body

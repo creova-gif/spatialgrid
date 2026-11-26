@@ -17,7 +17,12 @@ from shapely.strtree import STRtree
 
 from spatialgrid.exceptions import InvalidGeometryError, TenantIsolationError
 from spatialgrid.geo_utils import haversine_km
-from spatialgrid.index.geo import DEFAULT_H3_RESOLUTION, h3_grid_distance, point_to_h3
+from spatialgrid.index.geo import (
+    DEFAULT_H3_RESOLUTION,
+    h3_grid_disk,
+    h3_grid_distance,
+    point_to_h3,
+)
 from spatialgrid.models import (
     CoverageGapRequest,
     CoverageGapResponse,
@@ -108,6 +113,24 @@ class SpatialIndex:
             if only_active:
                 facs = [fac for fac in facs if fac.active]
             return sorted(facs, key=lambda fac: fac.facility_id)
+
+    def facilities_in_h3_ring(
+        self,
+        org_id: str,
+        origin: GeoPoint,
+        k: int = 1,
+        only_active: bool = True,
+    ) -> list[Facility]:
+        """Return facilities for org_id within k H3 grid steps of origin, sorted by facility_id."""
+        with self._lock:
+            disk = h3_grid_disk(point_to_h3(origin, self._h3_resolution), k)
+            facs = self._facility_lists_by_org.get(org_id, [])
+            matches = [
+                fac
+                for fac in facs
+                if (not only_active or fac.active) and fac.h3_index in disk
+            ]
+            return sorted(matches, key=lambda fac: fac.facility_id)
 
     def _rebuild_org_tree(self, org_id: str) -> None:
         """Rebuild the Shapely STRtree for a single organization."""

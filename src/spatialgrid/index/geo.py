@@ -29,6 +29,16 @@ def h3_grid_distance(cell_a: str, cell_b: str) -> int | None:
         return None
 
 
+def h3_grid_disk(cell: str, k: int = 1) -> set[str]:
+    """Return the set of H3 cell IDs within k grid steps of cell (inclusive)."""
+    if k < 0:
+        raise InvalidGeometryError(f"H3 grid disk radius k must be non-negative, got {k}.")
+    try:
+        return {str(c) for c in h3.grid_disk(cell, k)}
+    except (h3.H3BaseException, ValueError, TypeError) as exc:
+        raise InvalidGeometryError(f"Invalid H3 cell '{cell}' for grid_disk: {exc}") from exc
+
+
 def _parse_point_coordinates(geometry: Any, index: int) -> GeoPoint:
     """Validate and convert a GeoJSON Point geometry into a GeoPoint."""
     if not isinstance(geometry, dict) or geometry.get("type") != "Point":

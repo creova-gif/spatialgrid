@@ -450,3 +450,22 @@ def test_routes_to_geojson_structure() -> None:
         assert sf["properties"]["demand_id"] in {"stop-1", "stop-2"}
         assert isinstance(sf["properties"]["cumulative_load"], int)
         assert sf["properties"]["arrival_time_min"] is not None
+
+
+def test_optimize_dispatch_rejects_stops_exceeding_max_length() -> None:
+    stops = [
+        DemandNode(
+            demand_id=f"stop-{i}",
+            org_id="org-1",
+            location=GeoPoint(lat=37.7749, lon=-122.4194),
+            demand_units=1,
+        )
+        for i in range(501)
+    ]
+    with pytest.raises(ValidationError):
+        OptimizeDispatchRequest(
+            org_id="org-1",
+            depot_facility_id="depot-sf",
+            vehicles=[VehicleSpec(vehicle_id="veh-1", capacity=1000)],
+            stops=stops,
+        )

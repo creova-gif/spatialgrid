@@ -145,6 +145,7 @@ for match in response.matches:
 | `GET /workspace` | Interactive Deck.gl + MapLibre dispatch workspace |
 | `GET /healthz` | Liveness probe |
 | `GET /readyz` | Readiness probe (verifies index & storage readiness) |
+| `GET /metrics` | Prometheus text metrics exposition (`0.0.4`) |
 | `GET /v1/h3/summary` | H3 hexagonal cell summary for the scoped `org_id` |
 | `GET /v1/facilities` | List indexed facilities for the scoped `org_id` |
 | `DELETE /v1/facilities/{id}` | Remove a facility by ID for the scoped `org_id` |

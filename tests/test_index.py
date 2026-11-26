@@ -13,6 +13,7 @@ from spatialgrid.geo_utils import haversine_km
 from spatialgrid.index import (
     SpatialIndex,
     generate_synthetic_facilities,
+    h3_grid_disk,
     h3_grid_distance,
     load_facilities_geojson,
     point_to_h3,
@@ -505,3 +506,49 @@ def test_concurrent_add_and_nearest_stress() -> None:
     assert not errors
     # 20 seed + 8 writer batches * 10 facilities = 100
     assert index.org_facility_counts()["org-stress"] == 100
+
+
+def test_h3_grid_disk_valid_and_invalid() -> None:
+    chicago = GeoPoint(lat=41.8781, lon=-87.6298)
+    cell = point_to_h3(chicago)
+
+    disk_0 = h3_grid_disk(cell, k=0)
+    assert disk_0 == {cell}
+
+    disk_1 = h3_grid_disk(cell, k=1)
+    assert cell in disk_1
+    assert len(disk_1) == 7
+
+    with pytest.raises(InvalidGeometryError):
+        h3_grid_disk(cell, k=-1)
+
+    with pytest.raises(InvalidGeometryError):
+        h3_grid_disk("not-an-h3-cell", k=1)
+
+
+def test_facilities_in_h3_ring_and_org_isolation() -> None:
+    index = SpatialIndex(h3_resolution=7)
+    origin = GeoPoint(lat=41.8781, lon=-87.6298)
+    index.add_facilities(
+        [
+            _make_facility("f-b", "org-a", 41.8782, -87.6299, active=True),
+            _make_facility("f-a", "org-a", 41.8830, -87.6300, active=True),
+            _make_facility("f-inactive", "org-a", 41.8781, -87.6298, active=False),
+            _make_facility("f-far", "org-a", 42.3000, -87.9000, active=True),
+            _make_facility("f-other-org", "org-b", 41.8781, -87.6298, active=True),
+        ]
+    )
+
+    active_matches = index.facilities_in_h3_ring("org-a", origin, k=1, only_active=True)
+    assert [f.facility_id for f in active_matches] == ["f-a", "f-b"]
+
+    all_matches = index.facilities_in_h3_ring("org-a", origin, k=1, only_active=False)
+    assert [f.facility_id for f in all_matches] == ["f-a", "f-b", "f-inactive"]
+
+    other_org_matches = index.facilities_in_h3_ring("org-b", origin, k=1, only_active=True)
+    assert [f.facility_id for f in other_org_matches] == ["f-other-org"]
+
+    assert index.facilities_in_h3_ring("org-missing", origin, k=1) == []
+
+    with pytest.raises(InvalidGeometryError):
+        index.facilities_in_h3_ring("org-a", origin, k=-1)

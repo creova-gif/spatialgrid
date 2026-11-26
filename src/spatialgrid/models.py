@@ -106,7 +106,7 @@ class CoverageGapRequest(BaseModel):
     """Input contract for the coverage_gap deterministic tool."""
 
     org_id: str = Field(..., min_length=1)
-    demand_nodes: list[DemandNode] = Field(..., min_length=1)
+    demand_nodes: list[DemandNode] = Field(..., min_length=1, max_length=10_000)
     service_radius_km: float = Field(..., gt=0.0)
     min_facility_capacity: int = Field(default=0, ge=0)
     facility_type: str | None = Field(default=None)
@@ -138,8 +138,8 @@ class OptimizeDispatchRequest(BaseModel):
 
     org_id: str = Field(..., min_length=1)
     depot_facility_id: str = Field(..., min_length=1)
-    vehicles: list[VehicleSpec] = Field(..., min_length=1)
-    stops: list[DemandNode] = Field(..., min_length=1)
+    vehicles: list[VehicleSpec] = Field(..., min_length=1, max_length=100)
+    stops: list[DemandNode] = Field(..., min_length=1, max_length=500)
     time_limit_seconds: int = Field(default=5, ge=1, le=60)
 
     @field_validator("stops")
