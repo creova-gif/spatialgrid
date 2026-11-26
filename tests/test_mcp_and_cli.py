@@ -17,6 +17,7 @@ from spatialgrid.mcp_tools import (
     create_mcp_server,
     tool_coverage_gap,
     tool_healthcheck,
+    tool_ingest_geojson,
     tool_nearest_facilities,
     tool_optimize_dispatch,
 )
@@ -38,6 +39,7 @@ def test_create_mcp_server_registers_tools() -> None:
         "nearest_facilities",
         "coverage_gap",
         "optimize_dispatch",
+        "ingest_geojson",
     }
 
 
@@ -156,3 +158,47 @@ def test_cli_benchmark(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> No
     assert json_out.exists()
     data = json.loads(json_out.read_text(encoding="utf-8"))
     assert data["total_queries"] >= 1
+
+
+def test_tool_ingest_geojson_and_observability(caplog: pytest.LogCaptureFixture) -> None:
+    index = SpatialIndex()
+    geojson: dict[str, Any] = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "id": "acme-hub-1",
+                "geometry": {"type": "Point", "coordinates": [-87.6298, 41.8781]},
+                "properties": {"name": "Chicago Hub", "capacity": 200, "facility_type": "hub"},
+            },
+            {
+                "type": "Feature",
+                "id": "acme-hub-2",
+                "geometry": {"type": "Point", "coordinates": [-87.6500, 41.8900]},
+                "properties": {"name": "West Loop Hub", "capacity": 150},
+            },
+        ],
+    }
+
+    with caplog.at_level("INFO", logger="spatialgrid.mcp"):
+        result = tool_ingest_geojson(index=index, org_id="acme", geojson=geojson)
+
+    assert result == {
+        "org_id": "acme",
+        "ingested_count": 2,
+        "total_org_facilities": 2,
+    }
+    assert index.get_facility("acme", "acme-hub-1") is not None
+    assert any(
+        "tool=ingest_geojson" in rec.message and "org_id=acme" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_cli_serve_parser_flags() -> None:
+    args = cli._build_parser().parse_args(["serve", "--seed-demo", "--org-id", "acme"])
+    assert args.command == "serve"
+    assert args.seed_demo is True
+    assert args.org_id == "acme"
+    assert args.facilities_geojson is None
+    assert args.state_file is None

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from spatialgrid.benchmarks import format_benchmark_markdown, run_benchmark_suite
-from spatialgrid.index import SpatialIndex, generate_synthetic_facilities
+from spatialgrid.index import SpatialIndex, generate_synthetic_facilities, load_facilities_geojson
 from spatialgrid.mcp_tools import (
     create_mcp_server,
     tool_coverage_gap,
@@ -30,6 +30,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--seed-demo",
         action="store_true",
         help="Seed the server index with 25 synthetic demo-org facilities.",
+    )
+    serve_parser.add_argument(
+        "--facilities-geojson",
+        type=Path,
+        default=None,
+        help="Optional path to a GeoJSON FeatureCollection file to load on startup.",
+    )
+    serve_parser.add_argument(
+        "--org-id",
+        type=str,
+        default="default",
+        help="Default org_id for --facilities-geojson (default: 'default').",
+    )
+    serve_parser.add_argument(
+        "--state-file",
+        type=Path,
+        default=None,
+        help="Optional path to a SpatialIndex snapshot file to load/save on startup.",
     )
 
     benchmark_parser = subparsers.add_parser(
@@ -131,7 +149,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "serve":
-        server = create_mcp_server(seed_demo=bool(args.seed_demo))
+        state_path: Path | None = args.state_file
+        if state_path is not None and state_path.exists():
+            index = SpatialIndex.load_snapshot(state_path)
+        else:
+            index = SpatialIndex()
+
+        added_facilities = False
+        if args.seed_demo:
+            index.add_facilities(
+                generate_synthetic_facilities("demo-org", count=25, seed=42)
+            )
+            added_facilities = True
+
+        if args.facilities_geojson is not None:
+            geojson_path: Path = args.facilities_geojson
+            payload = json.loads(geojson_path.read_text(encoding="utf-8"))
+            facilities = load_facilities_geojson(payload, default_org_id=str(args.org_id))
+            index.add_facilities(facilities)
+            added_facilities = True
+
+        if state_path is not None and added_facilities:
+            index.save_snapshot(state_path)
+
+        server = create_mcp_server(index=index, seed_demo=False)
         server.run()
         return 0
 

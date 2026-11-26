@@ -39,9 +39,9 @@ See [ADR-001: Neuro-Symbolic Spatial Architecture](docs/adr/001-neuro-symbolic-a
 
 ## Features
 
-- **Exact Spatial Indexing (`spatialgrid.index`):** Indexes facilities per `org_id` using Shapely `STRtree` (R-tree) and Uber H3 cells (`resolution=7` default) with exact WGS84 Haversine distances and attribute/capacity filtering.
-- **Deterministic Routing (`spatialgrid.solver`):** Solves Capacitated Vehicle Routing Problems (CVRP) with optional per-vehicle `max_distance_km` limits via OR-Tools `GUIDED_LOCAL_SEARCH` and validates 100% geometric and capacity compliance.
-- **MCP Server & CLI (`spatialgrid.mcp_tools`, `spatialgrid.cli`):** Exposes `healthcheck`, `nearest_facilities`, `coverage_gap`, and `optimize_dispatch` over MCP (`mcp.server.mcpserver.MCPServer`) and a local CLI.
+- **Exact Spatial Indexing (`spatialgrid.index`):** Thread-safe (`RLock`) per-`org_id` indexing using Shapely `STRtree` (R-tree) and Uber H3 cells (`resolution=7` default) with exact WGS84 Haversine distances, attribute/capacity filtering, `remove_facility`/`list_facilities` lifecycle APIs, and atomic JSON snapshot persistence (`save_snapshot`/`load_snapshot`).
+- **Deterministic Routing (`spatialgrid.solver`):** Solves Capacitated Vehicle Routing Problems (CVRP) with optional per-vehicle `max_distance_km` limits via OR-Tools `GUIDED_LOCAL_SEARCH`, duplicate stop ID rejection, and post-solve geometric/capacity validation.
+- **MCP Server & CLI (`spatialgrid.mcp_tools`, `spatialgrid.cli`):** Exposes `healthcheck`, `ingest_geojson`, `nearest_facilities`, `coverage_gap`, and `optimize_dispatch` over MCP (`mcp.server.mcpserver.MCPServer`) with structured latency/error logging and CLI flags (`--facilities-geojson`, `--org-id`, `--state-file`).
 - **Tenant Isolation:** Every index lookup, coverage check, and dispatch solve enforces strict `org_id` scoping (`TenantIsolationError` on cross-tenant inputs).
 - **Reproducible 20-Query Benchmark (`spatialgrid.benchmarks`):** Evaluates geometric validity, spatial query p95 latency, and dispatch optimality gap against an unassisted baseline.
 
@@ -86,10 +86,10 @@ Run the 20-query benchmark suite (optionally exporting JSON):
 PYTHONPATH=src .venv/bin/python -m spatialgrid.cli benchmark --json-out benchmark-results.json
 ```
 
-Start the MCP stdio server (with optional 25-facility demo dataset for `demo-org`):
+Start the MCP stdio server (with optional 25-facility demo dataset, GeoJSON import, and durable snapshot state):
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m spatialgrid.cli serve --seed-demo
+PYTHONPATH=src .venv/bin/python -m spatialgrid.cli serve --seed-demo --state-file .spatialgrid-state.json
 ```
 
 ### MCP Client Configuration
@@ -141,8 +141,8 @@ Results from `PYTHONPATH=src .venv/bin/python -m spatialgrid.cli benchmark` (`se
 | --- | ---: | ---: | ---: |
 | Total Queries | 20 | 20 | 20 |
 | Geometric Validity | **100.0%** | 0.0% | 100% |
-| Spatial Query p95 Latency | **0.952 ms** | — | < 100 ms |
-| Dispatch Solver Mean Latency | **1004.943 ms** | — | 1s GLS budget |
+| Spatial Query p95 Latency | **1.226 ms** | — | < 100 ms |
+| Dispatch Solver Mean Latency | **1060.896 ms** | — | 1s GLS budget |
 | Mean Optimality Gap | **0.00%** | — | < 2% |
 
 ---

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from spatialgrid.exceptions import (
     SolverInfeasibleError,
@@ -265,3 +266,47 @@ def test_ortools_beats_naive_llm_guess_on_distance_and_validity() -> None:
     assert nn_cap_valid is True
     nn_dist = sum(r.total_distance_km for r in nn_routes)
     assert ortools_eq.total_distance_km <= nn_dist + 1e-6
+
+
+def test_optimize_dispatch_infeasible_max_distance_km() -> None:
+    depot = _make_depot()
+    far_stop = DemandNode(
+        demand_id="far-only",
+        org_id="org-1",
+        location=GeoPoint(lat=37.4419, lon=-122.1430),  # ~44 km from SF depot
+        demand_units=2,
+    )
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=[VehicleSpec(vehicle_id="veh-short", capacity=10, max_distance_km=5.0)],
+        stops=[far_stop],
+        time_limit_seconds=2,
+    )
+
+    with pytest.raises(SolverInfeasibleError):
+        optimize_dispatch(request, depot)
+
+
+def test_optimize_dispatch_rejects_duplicate_demand_id() -> None:
+    stops = [
+        DemandNode(
+            demand_id="dup-1",
+            org_id="org-1",
+            location=GeoPoint(lat=37.78, lon=-122.41),
+            demand_units=2,
+        ),
+        DemandNode(
+            demand_id="dup-1",
+            org_id="org-1",
+            location=GeoPoint(lat=37.79, lon=-122.42),
+            demand_units=3,
+        ),
+    ]
+    with pytest.raises(ValidationError, match="Duplicate demand_id"):
+        OptimizeDispatchRequest(
+            org_id="org-1",
+            depot_facility_id="depot-sf",
+            vehicles=[VehicleSpec(vehicle_id="veh-1", capacity=10)],
+            stops=stops,
+        )

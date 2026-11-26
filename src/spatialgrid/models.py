@@ -67,6 +67,14 @@ class FacilityMatch(BaseModel):
     h3_ring_distance: int | None = Field(default=None, ge=0)
 
 
+class IngestGeoJSONResponse(BaseModel):
+    """Output contract for ingest_geojson."""
+
+    org_id: str
+    ingested_count: int = Field(..., ge=0)
+    total_org_facilities: int = Field(..., ge=0)
+
+
 class NearestFacilitiesResponse(BaseModel):
     """Output contract for nearest_facilities."""
 
@@ -121,6 +129,11 @@ class OptimizeDispatchRequest(BaseModel):
     def _validate_same_org_stops(cls, stops: list[DemandNode]) -> list[DemandNode]:
         if not stops:
             raise ValueError("stops must not be empty")
+        seen_ids: set[str] = set()
+        for stop in stops:
+            if stop.demand_id in seen_ids:
+                raise ValueError(f"Duplicate demand_id in stops: '{stop.demand_id}'")
+            seen_ids.add(stop.demand_id)
         return stops
 
 

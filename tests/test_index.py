@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import json
+from pathlib import Path
+
 import pytest
 
 from spatialgrid.exceptions import InvalidGeometryError, TenantIsolationError
@@ -319,3 +323,185 @@ def test_tenant_isolation_strict() -> None:
                 service_radius_km=5.0,
             )
         )
+
+
+def test_remove_and_list_facilities() -> None:
+    index = SpatialIndex()
+    index.add_facilities(
+        [
+            _make_facility("f-b", "org-1", 41.88, -87.63, active=True),
+            _make_facility("f-a", "org-1", 41.89, -87.64, active=False),
+            _make_facility("f-c", "org-1", 41.90, -87.65, active=True),
+            _make_facility("f-other", "org-2", 41.91, -87.66, active=True),
+        ]
+    )
+
+    assert [f.facility_id for f in index.list_facilities("org-1")] == ["f-a", "f-b", "f-c"]
+    assert [f.facility_id for f in index.list_facilities("org-1", only_active=True)] == [
+        "f-b",
+        "f-c",
+    ]
+    assert index.list_facilities("org-missing") == []
+
+    # Remove missing facility / wrong org returns False
+    assert index.remove_facility("org-1", "f-nonexistent") is False
+    assert index.remove_facility("org-1", "f-other") is False
+    assert index.remove_facility("org-missing", "f-a") is False
+
+    # Remove existing facility returns True and updates counts + nearest queries
+    assert index.remove_facility("org-1", "f-b") is True
+    assert index.get_facility("org-1", "f-b") is None
+    assert [f.facility_id for f in index.list_facilities("org-1")] == ["f-a", "f-c"]
+    assert index.org_facility_counts() == {"org-1": 2, "org-2": 1}
+
+    # Removing last facility for an org cleans up org entry
+    assert index.remove_facility("org-2", "f-other") is True
+    assert index.org_facility_counts() == {"org-1": 2}
+    assert index.list_facilities("org-2") == []
+
+
+def test_coverage_gap_all_qualifying_reuses_org_tree() -> None:
+    index = SpatialIndex()
+    index.add_facilities(
+        [
+            _make_facility("f-1", "org-all", 41.8781, -87.6298, capacity=200, active=True),
+            _make_facility("f-2", "org-all", 41.9500, -87.6500, capacity=200, active=True),
+        ]
+    )
+    nodes = [
+        DemandNode(
+            demand_id="d-1",
+            org_id="org-all",
+            location=GeoPoint(lat=41.8790, lon=-87.6300),
+            demand_units=10,
+        ),
+        DemandNode(
+            demand_id="d-2",
+            org_id="org-all",
+            location=GeoPoint(lat=42.1000, lon=-87.7000),
+            demand_units=20,
+        ),
+    ]
+    result = index.coverage_gap(
+        CoverageGapRequest(
+            org_id="org-all",
+            demand_nodes=nodes,
+            service_radius_km=2.0,
+            min_facility_capacity=0,
+        )
+    )
+    assert result.covered_count == 1
+    assert result.uncovered_count == 1
+    assert result.uncovered_nodes[0].nearest_facility_id == "f-2"
+
+
+def test_snapshot_save_load_round_trip(tmp_path: Path) -> None:
+    index = SpatialIndex(h3_resolution=7)
+    index.add_facilities(
+        [
+            _make_facility("f-1", "org-a", 41.8781, -87.6298, capacity=100),
+            _make_facility("f-2", "org-a", 41.8900, -87.6350, capacity=200, active=False),
+            _make_facility("f-3", "org-b", 40.7128, -74.0060, capacity=300),
+        ]
+    )
+
+    snapshot_path = tmp_path / "nested" / "snapshot.json"
+    saved_count = index.save_snapshot(snapshot_path)
+    assert saved_count == 3
+    assert snapshot_path.exists()
+
+    loaded = SpatialIndex.load_snapshot(snapshot_path)
+    assert loaded.org_facility_counts() == {"org-a": 2, "org-b": 1}
+
+    orig_f1 = index.get_facility("org-a", "f-1")
+    loaded_f1 = loaded.get_facility("org-a", "f-1")
+    assert orig_f1 is not None and loaded_f1 is not None
+    assert loaded_f1 == orig_f1
+    assert loaded_f1.h3_index == point_to_h3(loaded_f1.location, resolution=7)
+
+    # Tenant isolation preserved after load
+    assert loaded.get_facility("org-a", "f-3") is None
+    nearest_b = loaded.nearest_facilities(
+        NearestFacilitiesRequest(
+            org_id="org-b",
+            origin=GeoPoint(lat=40.7128, lon=-74.0060),
+            limit=5,
+        )
+    )
+    assert [m.facility.facility_id for m in nearest_b.matches] == ["f-3"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{not valid json",
+        json.dumps([1, 2, 3]),
+        json.dumps({"version": 99, "h3_resolution": 8, "facilities": []}),
+        json.dumps({"version": 1, "h3_resolution": "bad", "facilities": []}),
+        json.dumps({"version": 1, "h3_resolution": 8, "facilities": "not-a-list"}),
+        json.dumps(
+            {
+                "version": 1,
+                "h3_resolution": 8,
+                "facilities": [{"facility_id": "bad-fac"}],
+            }
+        ),
+    ],
+)
+def test_load_snapshot_invalid_raises(tmp_path: Path, content: str) -> None:
+    bad_path = tmp_path / "bad_snapshot.json"
+    bad_path.write_text(content, encoding="utf-8")
+    with pytest.raises(InvalidGeometryError):
+        SpatialIndex.load_snapshot(bad_path)
+
+
+def test_load_snapshot_missing_file_raises(tmp_path: Path) -> None:
+    with pytest.raises(InvalidGeometryError):
+        SpatialIndex.load_snapshot(tmp_path / "does_not_exist.json")
+
+
+def test_concurrent_add_and_nearest_stress() -> None:
+    index = SpatialIndex()
+    seed_facilities = generate_synthetic_facilities("org-stress", count=20, seed=42)
+    index.add_facilities(seed_facilities)
+
+    origin = GeoPoint(lat=41.8781, lon=-87.6298)
+    errors: list[BaseException] = []
+
+    def writer(worker_id: int) -> int:
+        batch = [
+            _make_facility(
+                f"w{worker_id}-{i}",
+                "org-stress",
+                41.85 + (worker_id * 0.005) + (i * 0.001),
+                -87.65 + (i * 0.001),
+                capacity=100 + i,
+            )
+            for i in range(10)
+        ]
+        return index.add_facilities(batch)
+
+    def reader() -> int:
+        resp = index.nearest_facilities(
+            NearestFacilitiesRequest(org_id="org-stress", origin=origin, limit=5)
+        )
+        assert len(resp.matches) >= 1
+        return len(resp.matches)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures: list[concurrent.futures.Future[int]] = []
+        for idx in range(16):
+            if idx % 2 == 0:
+                futures.append(executor.submit(writer, idx))
+            else:
+                futures.append(executor.submit(reader))
+
+        for fut in futures:
+            try:
+                fut.result()
+            except BaseException as exc:
+                errors.append(exc)
+
+    assert not errors
+    # 20 seed + 8 writer batches * 10 facilities = 100
+    assert index.org_facility_counts()["org-stress"] == 100
