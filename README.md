@@ -41,7 +41,7 @@ See [ADR-001: Neuro-Symbolic Spatial Architecture](docs/adr/001-neuro-symbolic-a
 
 - **Exact Spatial Indexing (`spatialgrid.index`):** Thread-safe (`RLock`) per-`org_id` indexing using Shapely `STRtree` (R-tree) and Uber H3 cells (`resolution=7` default) with exact WGS84 Haversine distances, attribute/capacity filtering, `remove_facility`/`list_facilities` lifecycle APIs, and atomic JSON snapshot persistence (`save_snapshot`/`load_snapshot`).
 - **Deterministic Routing (`spatialgrid.solver`):** Solves Capacitated Vehicle Routing Problems (CVRP) with optional per-vehicle `max_distance_km`, `avg_speed_kmh`, `max_duration_min`, and per-stop time windows (`time_window_start_min`, `time_window_end_min`, `service_time_min`) via OR-Tools `GUIDED_LOCAL_SEARCH`, plus GeoJSON route export (`routes_to_geojson`).
-- **MCP Server, HTTP Gateway & CLI (`spatialgrid.mcp_tools`, `spatialgrid.api`, `spatialgrid.cli`):** Exposes `healthcheck`, `ingest_geojson`, `list_facilities`, `remove_facility`, `nearest_facilities`, `coverage_gap`, and `optimize_dispatch` over MCP (`MCPServer`), plus an authenticated Starlette/Uvicorn HTTP API (`/healthz`, `/readyz`, `GET/DELETE /v1/facilities`, `POST /v1/facilities/ingest`, `POST /v1/facilities/nearest`, `POST /v1/coverage-gap`, `POST /v1/dispatch/optimize?format=geojson`) with per-org rate limiting (`--rate-limit-rpm`), `2 MiB` payload limits, `X-Request-ID` tracing, and SQLite WAL persistence (`--db-path`).
+- **MCP Server, HTTP Gateway & CLI (`spatialgrid.mcp_tools`, `spatialgrid.api`, `spatialgrid.cli`):** Exposes `healthcheck`, `ingest_geojson`, `list_facilities`, `remove_facility`, `nearest_facilities`, `coverage_gap`, and `optimize_dispatch` over MCP (`MCPServer`), plus an authenticated Starlette/Uvicorn HTTP API (`GET /` redirect, `GET /workspace`, `GET /healthz`, `GET /readyz`, `GET /v1/h3/summary`, `GET /v1/facilities`, `DELETE /v1/facilities/{id}`, and `POST /v1/*` endpoints) with per-org rate limiting (`--rate-limit-rpm`), `2 MiB` payload limits, `X-Request-ID` tracing, and SQLite WAL persistence (`--db-path`).
 - **Tenant Isolation:** Every index lookup, coverage check, and dispatch solve enforces strict `org_id` scoping (`TenantIsolationError` on cross-tenant inputs).
 - **Reproducible 20-Query Benchmark (`spatialgrid.benchmarks`):** Evaluates geometric validity, spatial query p95 latency, and dispatch optimality gap against an unassisted baseline.
 
@@ -137,6 +137,45 @@ for match in response.matches:
     print(match.facility.facility_id, f"{match.distance_km:.2f} km", match.facility.h3_index)
 ```
 
+### HTTP API Endpoints
+
+| Method & Path | Description |
+| --- | --- |
+| `GET /` | Redirects to `/workspace` |
+| `GET /workspace` | Interactive Deck.gl + MapLibre dispatch workspace |
+| `GET /healthz` | Liveness probe |
+| `GET /readyz` | Readiness probe (verifies index & storage readiness) |
+| `GET /v1/h3/summary` | H3 hexagonal cell summary for the scoped `org_id` |
+| `GET /v1/facilities` | List indexed facilities for the scoped `org_id` |
+| `DELETE /v1/facilities/{id}` | Remove a facility by ID for the scoped `org_id` |
+| `POST /v1/facilities/ingest` | Ingest a GeoJSON `FeatureCollection` into the index |
+| `POST /v1/facilities/nearest` | Query nearest facilities by Haversine distance & capacity |
+| `POST /v1/coverage-gap` | Identify demand nodes outside `service_radius_km` |
+| `POST /v1/dispatch/optimize` | Solve CVRP dispatch routes (supports `?format=geojson`) |
+
+---
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description |
+| --- | --- |
+| `SPATIALGRID_API_KEYS` | JSON object mapping Bearer tokens to `org_id` (e.g., `'{"tok-acme":"acme"}'`). Used by `serve-http` for constant-time `Authorization: Bearer <token>` authentication and tenant binding. |
+
+### CLI Flags
+
+| Flag | Commands | Description |
+| --- | --- | --- |
+| `--require-auth` | `serve-http` | Require `SPATIALGRID_API_KEYS` to be set and enforce Bearer token authentication on `/v1/*` endpoints. |
+| `--rate-limit-rpm` | `serve-http` | Optional per-`org_id` sliding-window requests-per-minute limit for `/v1/*` endpoints. |
+| `--db-path` | `serve`, `serve-http` | Path to a SQLite database file for durable WAL facility persistence. |
+| `--state-file` | `serve` | Path to a `SpatialIndex` JSON snapshot file to load on startup and save after initial seeding. |
+| `--facilities-geojson` | `serve`, `serve-http` | Path to a GeoJSON `FeatureCollection` file to load into the index on startup. |
+| `--org-id` | `serve`, `serve-http` | Default `org_id` applied to facilities loaded via `--facilities-geojson` (default: `default`). |
+| `--seed-demo` | `serve`, `serve-http` | Seed the index with 25 synthetic `demo-org` facilities on startup. |
+| `--host` / `--port` | `serve-http` | Bind address and port for the HTTP gateway (default: `127.0.0.1:8080`). |
+
 ---
 
 ## Benchmarks
@@ -172,17 +211,23 @@ spatialgrid/
 │   ├── exceptions.py
 │   ├── geo_utils.py
 │   ├── models.py
+│   ├── py.typed
+│   ├── api/
 │   ├── benchmarks/
 │   ├── index/
 │   ├── mcp_tools/
-│   └── solver/
+│   ├── solver/
+│   └── storage/
 ├── tests/
 ├── AGENTS.md
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
+├── Dockerfile
 ├── LICENSE
 ├── PROJECT_SPEC.md
+├── SECURITY.md
 ├── TASKS.md
+├── docker-compose.yml
 └── pyproject.toml
 ```
 
@@ -196,7 +241,7 @@ PYTHONPATH=src .venv/bin/mypy src tests
 PYTHONPATH=src .venv/bin/pytest -v
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on branches, ADRs, tests, and pull requests.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on branches, ADRs, tests, and pull requests, and [SECURITY.md](SECURITY.md) for vulnerability reporting and security controls.
 
 ---
 

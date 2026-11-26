@@ -12,9 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deterministic OR-Tools CVRP solver (`spatialgrid.solver`) with vehicle capacity, `max_distance_km`, time-window (`time_window_start_min`/`time_window_end_min`), `max_duration_min`, `service_time_min` constraints, GeoJSON export (`routes_to_geojson`), duplicate `demand_id` validation, post-solve route validation, and baseline heuristics.
 - MCP server (`spatialgrid.mcp_tools`) exposing `healthcheck`, `ingest_geojson`, `list_facilities`, `remove_facility`, `nearest_facilities`, `coverage_gap`, and `optimize_dispatch` with structured logging.
 - Durable SQLite WAL facility store (`spatialgrid.storage.SQLiteFacilityStore`) with `(org_id, facility_id)` composite primary key and `--db-path` CLI integration.
-- Authenticated Starlette/Uvicorn HTTP API gateway (`spatialgrid.api.create_http_app`, `spatialgrid serve-http`) with Bearer token `org_id` binding, `/readyz`, per-org sliding-window rate limiting, `2 MiB` payload guard, `X-Request-ID` correlation, `?format=geojson` dispatch export, and JSON error mapping.
-- Interactive Deck.gl + MapLibre dispatch workspace at `GET /workspace`, `docker-compose.yml`, and `examples/chicago_facilities.geojson`.
-- Multi-stage `Dockerfile`, `.dockerignore`, and `gitleaks` secret-scanning job in CI.
+- Authenticated Starlette/Uvicorn HTTP API gateway (`spatialgrid.api.create_http_app`, `spatialgrid serve-http`) with Bearer token `org_id` binding, `GET /` redirect to `/workspace`, `/readyz`, `GET /v1/h3/summary`, per-org sliding-window rate limiting, `2 MiB` payload guard, `X-Request-ID` correlation, `?format=geojson` dispatch export, and JSON error mapping.
+- Interactive Deck.gl + MapLibre dispatch workspace at `GET /workspace` with upgraded interactive controls, `docker-compose.yml`, and `examples/chicago_facilities.geojson`.
+- Multi-stage `Dockerfile`, `.dockerignore`, `SECURITY.md`, PEP 561 `src/spatialgrid/py.typed` marker, and `gitleaks` secret-scanning job in CI.
 - CLI (`spatialgrid.cli`) supporting `serve`, `serve-http`, `demo`, and `benchmark`.
 - 20-query deterministic benchmark suite (`spatialgrid.benchmarks`) and 60 unit/integration tests (`ruff`, `mypy --strict`, `pytest`).
 - GitHub templates, CI workflow, MIT `LICENSE`, `CONTRIBUTING.md`, and `docs/adr/001-neuro-symbolic-architecture.md`.

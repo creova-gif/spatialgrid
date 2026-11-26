@@ -352,13 +352,48 @@ def test_dispatch_optimize_geojson_format() -> None:
 
 def test_workspace_html_and_example_geojson() -> None:
     client = TestClient(create_http_app())
+
+    root_resp = client.get("/", follow_redirects=False)
+    assert root_resp.status_code == 302
+    assert root_resp.headers["location"] == "/workspace"
+
     ws_resp = client.get("/workspace")
     assert ws_resp.status_code == 200
     assert "text/html" in ws_resp.headers["content-type"]
     assert "SpatialGrid Workspace" in ws_resp.text
     assert "deck.gl" in ws_resp.text
+    for control_label in (
+        "Load Facilities",
+        "Nearest Facilities",
+        "Run Coverage Gap",
+        "Run Sample Dispatch (GeoJSON)",
+        "Ingest GeoJSON",
+    ):
+        assert control_label in ws_resp.text
 
     example_path = Path(__file__).resolve().parents[1] / "examples" / "chicago_facilities.geojson"
     payload = json.loads(example_path.read_text(encoding="utf-8"))
     facilities = load_facilities_geojson(payload, default_org_id="demo-org")
     assert len(facilities) == 4
+
+
+def test_h3_summary_aggregation_and_tenant_isolation() -> None:
+    index = SpatialIndex()
+    facilities = load_facilities_geojson(_sample_geojson(), default_org_id="acme")
+    index.add_facilities(facilities)
+    client = TestClient(create_http_app(index=index, api_keys={"tok-acme": "acme"}))
+
+    resp = client.get("/v1/h3/summary", headers={"Authorization": "Bearer tok-acme"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["org_id"] == "acme"
+    cells = body["cells"]
+    assert [c["h3_index"] for c in cells] == sorted(c["h3_index"] for c in cells)
+    assert sum(c["facility_count"] for c in cells) == 2
+    assert sum(c["total_capacity"] for c in cells) == 350
+
+    cross_resp = client.get(
+        "/v1/h3/summary?org_id=other-org",
+        headers={"Authorization": "Bearer tok-acme"},
+    )
+    assert cross_resp.status_code == 403

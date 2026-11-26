@@ -16,7 +16,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.routing import Route
 
 from spatialgrid.api.workspace import WORKSPACE_HTML
@@ -204,6 +204,9 @@ def create_http_app(
     async def healthz(_request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok", "service": "spatialgrid"}, status_code=200)
 
+    async def root_redirect(_request: Request) -> RedirectResponse:
+        return RedirectResponse(url="/workspace", status_code=302)
+
     async def workspace(_request: Request) -> HTMLResponse:
         return HTMLResponse(WORKSPACE_HTML, status_code=200)
 
@@ -344,10 +347,39 @@ def create_http_app(
             return JSONResponse(routes_to_geojson(result, depot), status_code=200)
         return JSONResponse(result.model_dump(), status_code=200)
 
+    async def _handle_h3_summary(request: Request, authed_org: str | None) -> JSONResponse:
+        org_id = request.query_params.get("org_id") or authed_org
+        if not org_id:
+            return JSONResponse(
+                {"error": "Missing required query parameter 'org_id'."},
+                status_code=400,
+            )
+        mismatch = _check_org_match(authed_org, org_id)
+        if mismatch is not None:
+            return mismatch
+        facilities = active_index.list_facilities(org_id)
+        agg: dict[str, dict[str, int]] = {}
+        for fac in facilities:
+            cell = fac.h3_index or "unknown"
+            entry = agg.setdefault(cell, {"facility_count": 0, "total_capacity": 0})
+            entry["facility_count"] += 1
+            entry["total_capacity"] += fac.capacity
+        cells = [
+            {
+                "h3_index": cell_id,
+                "facility_count": stats["facility_count"],
+                "total_capacity": stats["total_capacity"],
+            }
+            for cell_id, stats in sorted(agg.items())
+        ]
+        return JSONResponse({"org_id": org_id, "cells": cells}, status_code=200)
+
     routes = [
+        Route("/", root_redirect, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
         Route("/readyz", readyz, methods=["GET"]),
         Route("/workspace", workspace, methods=["GET"]),
+        Route("/v1/h3/summary", _with_observability(_handle_h3_summary), methods=["GET"]),
         Route("/v1/facilities", _with_observability(_handle_list_facilities), methods=["GET"]),
         Route(
             "/v1/facilities/{facility_id}",
