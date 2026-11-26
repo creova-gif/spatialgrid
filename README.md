@@ -86,10 +86,16 @@ Run the 20-query benchmark suite (optionally exporting JSON):
 PYTHONPATH=src .venv/bin/python -m spatialgrid.cli benchmark --json-out benchmark-results.json
 ```
 
-Start the MCP stdio server (with optional 25-facility demo dataset, GeoJSON import, and durable snapshot state):
+Start the HTTP API gateway and open the interactive Deck.gl dispatch workspace at `http://127.0.0.1:8080/workspace`:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m spatialgrid.cli serve --seed-demo --state-file .spatialgrid-state.json
+PYTHONPATH=src .venv/bin/python -m spatialgrid.cli serve-http --facilities-geojson examples/chicago_facilities.geojson --org-id demo-org --db-path .spatialgrid.db
+```
+
+Or run with Docker Compose:
+
+```bash
+docker compose up --build
 ```
 
 ### MCP Client Configuration

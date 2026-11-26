@@ -1,0 +1,28 @@
+services:
+  spatialgrid:
+    build: .
+    image: spatialgrid:0.1.0
+    ports:
+      - "8080:8080"
+    command:
+      - spatialgrid
+      - serve-http
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --db-path
+      - /data/spatialgrid.db
+      - --seed-demo
+      - --rate-limit-rpm
+      - "120"
+    volumes:
+      - spatialgrid_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  spatialgrid_data:

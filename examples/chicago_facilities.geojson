@@ -1,0 +1,49 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "chi-depot-central",
+      "geometry": { "type": "Point", "coordinates": [-87.6298, 41.8781] },
+      "properties": {
+        "name": "Chicago Loop Central Depot",
+        "capacity": 500,
+        "facility_type": "depot",
+        "active": true
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "chi-hub-west",
+      "geometry": { "type": "Point", "coordinates": [-87.6650, 41.8850] },
+      "properties": {
+        "name": "West Loop Fulfillment Hub",
+        "capacity": 250,
+        "facility_type": "warehouse",
+        "active": true
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "chi-hub-north",
+      "geometry": { "type": "Point", "coordinates": [-87.6530, 41.9390] },
+      "properties": {
+        "name": "Lincoln Park Micro-Hub",
+        "capacity": 180,
+        "facility_type": "hub",
+        "active": true
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "chi-hub-south",
+      "geometry": { "type": "Point", "coordinates": [-87.6180, 41.8020] },
+      "properties": {
+        "name": "Bronzeville Distribution Center",
+        "capacity": 320,
+        "facility_type": "warehouse",
+        "active": true
+      }
+    }
+  ]
+}

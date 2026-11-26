@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -9,7 +11,7 @@ from starlette.testclient import TestClient
 
 from spatialgrid.api import create_http_app
 from spatialgrid.cli import _load_api_keys_from_env
-from spatialgrid.index import SpatialIndex, generate_synthetic_facilities
+from spatialgrid.index import SpatialIndex, generate_synthetic_facilities, load_facilities_geojson
 
 
 def _sample_geojson() -> dict[str, Any]:
@@ -346,3 +348,17 @@ def test_dispatch_optimize_geojson_format() -> None:
     geom_types = {feature["geometry"]["type"] for feature in geojson["features"]}
     assert "LineString" in geom_types
     assert "Point" in geom_types
+
+
+def test_workspace_html_and_example_geojson() -> None:
+    client = TestClient(create_http_app())
+    ws_resp = client.get("/workspace")
+    assert ws_resp.status_code == 200
+    assert "text/html" in ws_resp.headers["content-type"]
+    assert "SpatialGrid Workspace" in ws_resp.text
+    assert "deck.gl" in ws_resp.text
+
+    example_path = Path(__file__).resolve().parents[1] / "examples" / "chicago_facilities.geojson"
+    payload = json.loads(example_path.read_text(encoding="utf-8"))
+    facilities = load_facilities_geojson(payload, default_org_id="demo-org")
+    assert len(facilities) == 4

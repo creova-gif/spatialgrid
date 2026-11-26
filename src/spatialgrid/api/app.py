@@ -16,9 +16,10 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
+from spatialgrid.api.workspace import WORKSPACE_HTML
 from spatialgrid.exceptions import (
     InvalidGeometryError,
     SolverInfeasibleError,
@@ -203,6 +204,9 @@ def create_http_app(
     async def healthz(_request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok", "service": "spatialgrid"}, status_code=200)
 
+    async def workspace(_request: Request) -> HTMLResponse:
+        return HTMLResponse(WORKSPACE_HTML, status_code=200)
+
     async def readyz(_request: Request) -> JSONResponse:
         return JSONResponse(
             {"status": "ready", "orgs_indexed": len(active_index.org_facility_counts())},
@@ -343,6 +347,7 @@ def create_http_app(
     routes = [
         Route("/healthz", healthz, methods=["GET"]),
         Route("/readyz", readyz, methods=["GET"]),
+        Route("/workspace", workspace, methods=["GET"]),
         Route("/v1/facilities", _with_observability(_handle_list_facilities), methods=["GET"]),
         Route(
             "/v1/facilities/{facility_id}",
