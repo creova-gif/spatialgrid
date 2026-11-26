@@ -40,6 +40,8 @@ def test_create_mcp_server_registers_tools() -> None:
         "coverage_gap",
         "optimize_dispatch",
         "ingest_geojson",
+        "list_facilities",
+        "remove_facility",
     }
 
 

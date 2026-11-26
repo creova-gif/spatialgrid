@@ -157,6 +157,35 @@ def tool_ingest_geojson(
         ).model_dump()
 
 
+def tool_list_facilities(
+    index: SpatialIndex,
+    org_id: str,
+    only_active: bool = False,
+) -> dict[str, Any]:
+    """List indexed facilities for an organization."""
+    with _log_tool_call("list_facilities", org_id=org_id):
+        return {
+            "org_id": org_id,
+            "facilities": [
+                f.model_dump() for f in index.list_facilities(org_id, only_active=only_active)
+            ],
+        }
+
+
+def tool_remove_facility(
+    index: SpatialIndex,
+    org_id: str,
+    facility_id: str,
+) -> dict[str, Any]:
+    """Remove a facility from the spatial index for an organization."""
+    with _log_tool_call("remove_facility", org_id=org_id):
+        return {
+            "org_id": org_id,
+            "facility_id": facility_id,
+            "removed": index.remove_facility(org_id, facility_id),
+        }
+
+
 def create_mcp_server(
     index: SpatialIndex | None = None,
     seed_demo: bool = False,
@@ -243,6 +272,30 @@ def create_mcp_server(
             index=active_index,
             org_id=org_id,
             geojson=geojson,
+        )
+
+    @mcp.tool()
+    def list_facilities(
+        org_id: str,
+        only_active: bool = False,
+    ) -> dict[str, Any]:
+        """List indexed facilities for an organization."""
+        return tool_list_facilities(
+            index=active_index,
+            org_id=org_id,
+            only_active=only_active,
+        )
+
+    @mcp.tool()
+    def remove_facility(
+        org_id: str,
+        facility_id: str,
+    ) -> dict[str, Any]:
+        """Remove a facility from the spatial index for an organization."""
+        return tool_remove_facility(
+            index=active_index,
+            org_id=org_id,
+            facility_id=facility_id,
         )
 
     return mcp

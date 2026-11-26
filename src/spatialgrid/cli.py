@@ -8,6 +8,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import uvicorn
+
+from spatialgrid.api import create_http_app
 from spatialgrid.benchmarks import format_benchmark_markdown, run_benchmark_suite
 from spatialgrid.index import SpatialIndex, generate_synthetic_facilities, load_facilities_geojson
 from spatialgrid.mcp_tools import (
@@ -16,6 +19,7 @@ from spatialgrid.mcp_tools import (
     tool_nearest_facilities,
     tool_optimize_dispatch,
 )
+from spatialgrid.storage import SQLiteFacilityStore
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -48,6 +52,52 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional path to a SpatialIndex snapshot file to load/save on startup.",
+    )
+    serve_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=None,
+        help="Optional path to a SQLite database file for persistent facility storage.",
+    )
+
+    serve_http_parser = subparsers.add_parser(
+        "serve-http",
+        help="Run the SpatialGrid Starlette HTTP API gateway.",
+    )
+    serve_http_parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Host interface to bind (default: 127.0.0.1).",
+    )
+    serve_http_parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port to listen on (default: 8080).",
+    )
+    serve_http_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=None,
+        help="Optional path to a SQLite database file for persistent facility storage.",
+    )
+    serve_http_parser.add_argument(
+        "--seed-demo",
+        action="store_true",
+        help="Seed the server index with 25 synthetic demo-org facilities.",
+    )
+    serve_http_parser.add_argument(
+        "--facilities-geojson",
+        type=Path,
+        default=None,
+        help="Optional path to a GeoJSON FeatureCollection file to load on startup.",
+    )
+    serve_http_parser.add_argument(
+        "--org-id",
+        type=str,
+        default="default",
+        help="Default org_id for --facilities-geojson (default: 'default').",
     )
 
     benchmark_parser = subparsers.add_parser(
@@ -143,37 +193,53 @@ def _run_demo() -> dict[str, Any]:
     }
 
 
+def _create_index_from_args(args: argparse.Namespace) -> tuple[SpatialIndex, bool]:
+    """Initialize SpatialIndex (with optional snapshot/SQLite store) and load startup facilities."""
+    state_path: Path | None = getattr(args, "state_file", None)
+    db_path: Path | None = getattr(args, "db_path", None)
+    store = SQLiteFacilityStore(db_path) if db_path is not None else None
+
+    if state_path is not None and state_path.exists():
+        index = SpatialIndex.load_snapshot(state_path)
+    else:
+        index = SpatialIndex(store=store)
+
+    added_facilities = False
+    if args.seed_demo:
+        index.add_facilities(
+            generate_synthetic_facilities("demo-org", count=25, seed=42)
+        )
+        added_facilities = True
+
+    if args.facilities_geojson is not None:
+        geojson_path: Path = args.facilities_geojson
+        payload = json.loads(geojson_path.read_text(encoding="utf-8"))
+        facilities = load_facilities_geojson(payload, default_org_id=str(args.org_id))
+        index.add_facilities(facilities)
+        added_facilities = True
+
+    return index, added_facilities
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the SpatialGrid CLI."""
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "serve":
+        index, added_facilities = _create_index_from_args(args)
         state_path: Path | None = args.state_file
-        if state_path is not None and state_path.exists():
-            index = SpatialIndex.load_snapshot(state_path)
-        else:
-            index = SpatialIndex()
-
-        added_facilities = False
-        if args.seed_demo:
-            index.add_facilities(
-                generate_synthetic_facilities("demo-org", count=25, seed=42)
-            )
-            added_facilities = True
-
-        if args.facilities_geojson is not None:
-            geojson_path: Path = args.facilities_geojson
-            payload = json.loads(geojson_path.read_text(encoding="utf-8"))
-            facilities = load_facilities_geojson(payload, default_org_id=str(args.org_id))
-            index.add_facilities(facilities)
-            added_facilities = True
-
         if state_path is not None and added_facilities:
             index.save_snapshot(state_path)
 
         server = create_mcp_server(index=index, seed_demo=False)
         server.run()
+        return 0
+
+    if args.command == "serve-http":
+        index, _ = _create_index_from_args(args)
+        app = create_http_app(index=index)
+        uvicorn.run(app, host=str(args.host), port=int(args.port))
         return 0
 
     if args.command == "benchmark":

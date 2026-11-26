@@ -28,6 +28,7 @@ from spatialgrid.models import (
     NearestFacilitiesResponse,
     UncoveredDemand,
 )
+from spatialgrid.storage import SQLiteFacilityStore
 
 _KM_PER_DEGREE_LAT = 110.574
 
@@ -35,12 +36,40 @@ _KM_PER_DEGREE_LAT = 110.574
 class SpatialIndex:
     """In-memory, tenant-isolated spatial index backed by Shapely STRtree and H3."""
 
-    def __init__(self, h3_resolution: int = DEFAULT_H3_RESOLUTION) -> None:
+    def __init__(
+        self,
+        h3_resolution: int = DEFAULT_H3_RESOLUTION,
+        store: SQLiteFacilityStore | None = None,
+    ) -> None:
         self._h3_resolution = h3_resolution
+        self._store = store
         self._lock = threading.RLock()
         self._facilities_by_org: dict[str, dict[str, Facility]] = {}
         self._facility_lists_by_org: dict[str, list[Facility]] = {}
         self._trees_by_org: dict[str, STRtree] = {}
+
+        if self._store is not None:
+            existing = self._store.load_all_facilities()
+            if existing:
+                with self._lock:
+                    self._index_in_memory(existing)
+
+    def _index_in_memory(self, facilities: list[Facility]) -> list[Facility]:
+        """Assign H3 cells, update in-memory maps, and rebuild affected per-org STRtrees."""
+        indexed_facilities: list[Facility] = []
+        affected_orgs: set[str] = set()
+        for facility in facilities:
+            h3_cell = point_to_h3(facility.location, self._h3_resolution)
+            indexed = facility.model_copy(update={"h3_index": h3_cell})
+            org_store = self._facilities_by_org.setdefault(facility.org_id, {})
+            org_store[facility.facility_id] = indexed
+            indexed_facilities.append(indexed)
+            affected_orgs.add(facility.org_id)
+
+        for org_id in affected_orgs:
+            self._rebuild_org_tree(org_id)
+
+        return indexed_facilities
 
     def add_facilities(self, facilities: list[Facility]) -> int:
         """Index facilities grouped by org_id, rebuilding affected per-org STRtrees."""
@@ -48,16 +77,9 @@ class SpatialIndex:
             return 0
 
         with self._lock:
-            affected_orgs: set[str] = set()
-            for facility in facilities:
-                h3_cell = point_to_h3(facility.location, self._h3_resolution)
-                indexed = facility.model_copy(update={"h3_index": h3_cell})
-                org_store = self._facilities_by_org.setdefault(facility.org_id, {})
-                org_store[facility.facility_id] = indexed
-                affected_orgs.add(facility.org_id)
-
-            for org_id in affected_orgs:
-                self._rebuild_org_tree(org_id)
+            indexed_facilities = self._index_in_memory(facilities)
+            if self._store is not None:
+                self._store.upsert_facilities(indexed_facilities)
 
         return len(facilities)
 
@@ -70,6 +92,8 @@ class SpatialIndex:
 
             org_store.pop(facility_id)
             self._rebuild_org_tree(org_id)
+            if self._store is not None:
+                self._store.delete_facility(org_id, facility_id)
             return True
 
     def get_facility(self, org_id: str, facility_id: str) -> Facility | None:

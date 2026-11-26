@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Neuro-symbolic spatial indexing package (`spatialgrid.index`) backed by Shapely `STRtree` and Uber H3 with strict `org_id` tenant isolation, `RLock` thread safety, `remove_facility`/`list_facilities`, and atomic JSON snapshot persistence (`save_snapshot`/`load_snapshot`).
 - Deterministic OR-Tools CVRP solver (`spatialgrid.solver`) with vehicle capacity, `max_distance_km` constraints, duplicate `demand_id` validation, post-solve route validation, and baseline heuristics.
-- MCP server (`spatialgrid.mcp_tools`) exposing `healthcheck`, `ingest_geojson`, `nearest_facilities`, `coverage_gap`, and `optimize_dispatch` with structured logging.
-- CLI (`spatialgrid.cli`) supporting `serve` (`--seed-demo`, `--facilities-geojson`, `--org-id`, `--state-file`), `demo`, and `benchmark`.
-- 20-query deterministic benchmark suite (`spatialgrid.benchmarks`) and 44 unit/integration tests (`ruff`, `mypy --strict`, `pytest`).
+- MCP server (`spatialgrid.mcp_tools`) exposing `healthcheck`, `ingest_geojson`, `list_facilities`, `remove_facility`, `nearest_facilities`, `coverage_gap`, and `optimize_dispatch` with structured logging.
+- Durable SQLite WAL facility store (`spatialgrid.storage.SQLiteFacilityStore`) with `(org_id, facility_id)` composite primary key and `--db-path` CLI integration.
+- Authenticated Starlette/Uvicorn HTTP API gateway (`spatialgrid.api.create_http_app`, `spatialgrid serve-http`) with Bearer token `org_id` binding and JSON error mapping.
+- CLI (`spatialgrid.cli`) supporting `serve`, `serve-http`, `demo`, and `benchmark`.
+- 20-query deterministic benchmark suite (`spatialgrid.benchmarks`) and 50 unit/integration tests (`ruff`, `mypy --strict`, `pytest`).
 - GitHub templates, CI workflow, MIT `LICENSE`, `CONTRIBUTING.md`, and `docs/adr/001-neuro-symbolic-architecture.md`.
