@@ -2,7 +2,7 @@
 
 **Neuro-symbolic spatial reasoning & physical-world data infrastructure for AI agents.**
 
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](.github/workflows/ci.yml)
+[![CI](https://github.com/creova-gif/spatialgrid/actions/workflows/ci.yml/badge.svg)](https://github.com/creova-gif/spatialgrid/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.1.0-informational.svg)](CHANGELOG.md)
@@ -52,7 +52,7 @@ See [ADR-001: Neuro-Symbolic Spatial Architecture](docs/adr/001-neuro-symbolic-a
 ### Using `uv` (recommended)
 
 ```bash
-git clone https://github.com/justinmafie/spatialgrid.git
+git clone https://github.com/creova-gif/spatialgrid.git
 cd spatialgrid
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
