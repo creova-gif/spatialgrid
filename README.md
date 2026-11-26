@@ -5,7 +5,7 @@
 [![CI](https://github.com/creova-gif/spatialgrid/actions/workflows/ci.yml/badge.svg)](https://github.com/creova-gif/spatialgrid/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.0-informational.svg)](CHANGELOG.md)
 [![Typed: mypy strict](https://img.shields.io/badge/mypy-strict-blue.svg)](pyproject.toml)
 [![Lint: ruff](https://img.shields.io/badge/ruff-checked-purple.svg)](pyproject.toml)
 
