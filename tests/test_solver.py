@@ -1,0 +1,267 @@
+"""Unit tests for the SpatialGrid OR-Tools CVRP solver and baselines."""
+
+from __future__ import annotations
+
+import pytest
+
+from spatialgrid.exceptions import (
+    SolverInfeasibleError,
+    SpatialGridError,
+    TenantIsolationError,
+)
+from spatialgrid.models import (
+    DemandNode,
+    Facility,
+    GeoPoint,
+    OptimizeDispatchRequest,
+    VehicleSpec,
+)
+from spatialgrid.solver import (
+    naive_llm_guess_dispatch,
+    nearest_neighbor_heuristic,
+    optimize_dispatch,
+    validate_dispatch_solution,
+)
+
+
+def _make_depot(org_id: str = "org-1", facility_id: str = "depot-sf") -> Facility:
+    return Facility(
+        facility_id=facility_id,
+        org_id=org_id,
+        name="SF Central Depot",
+        location=GeoPoint(lat=37.7749, lon=-122.4194),
+        capacity=1000,
+        facility_type="depot",
+    )
+
+
+def _make_clustered_stops(org_id: str = "org-1") -> list[DemandNode]:
+    # Interleaved north (Marin/Berkeley) and south (San Mateo/Palo Alto) stops so
+    # naive round-robin interleaving crisscrosses the Bay Area while OR-Tools clusters.
+    return [
+        DemandNode(
+            demand_id="stop-north-1",
+            org_id=org_id,
+            location=GeoPoint(lat=37.8715, lon=-122.2730),  # Berkeley
+            demand_units=3,
+        ),
+        DemandNode(
+            demand_id="stop-south-1",
+            org_id=org_id,
+            location=GeoPoint(lat=37.5630, lon=-122.3255),  # San Mateo
+            demand_units=4,
+        ),
+        DemandNode(
+            demand_id="stop-north-2",
+            org_id=org_id,
+            location=GeoPoint(lat=37.9060, lon=-122.5450),  # Mill Valley
+            demand_units=2,
+        ),
+        DemandNode(
+            demand_id="stop-south-2",
+            org_id=org_id,
+            location=GeoPoint(lat=37.4419, lon=-122.1430),  # Palo Alto
+            demand_units=5,
+        ),
+        DemandNode(
+            demand_id="stop-north-3",
+            org_id=org_id,
+            location=GeoPoint(lat=37.9735, lon=-122.5311),  # San Rafael
+            demand_units=3,
+        ),
+        DemandNode(
+            demand_id="stop-south-3",
+            org_id=org_id,
+            location=GeoPoint(lat=37.3861, lon=-122.0839),  # Mountain View
+            demand_units=4,
+        ),
+    ]
+
+
+def test_optimize_dispatch_multi_vehicle_valid() -> None:
+    depot = _make_depot()
+    stops = _make_clustered_stops()
+    vehicles = [
+        VehicleSpec(vehicle_id="veh-1", capacity=10),
+        VehicleSpec(vehicle_id="veh-2", capacity=15),
+    ]
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=vehicles,
+        stops=stops,
+        time_limit_seconds=3,
+    )
+
+    response = optimize_dispatch(request, depot)
+
+    assert response.org_id == "org-1"
+    assert response.depot_facility_id == "depot-sf"
+    assert response.solver_status in ("OPTIMAL", "FEASIBLE")
+    assert response.geometrically_valid is True
+    assert response.capacity_valid is True
+    assert response.total_demand_served == sum(s.demand_units for s in stops)
+    assert response.total_distance_km > 0.0
+    assert len(response.routes) == 2
+
+    visited = [rs.demand_id for r in response.routes for rs in r.stops]
+    assert sorted(visited) == sorted(s.demand_id for s in stops)
+    for route in response.routes:
+        assert route.total_load <= route.vehicle_capacity
+
+
+def test_optimize_dispatch_respects_max_distance_km() -> None:
+    depot = _make_depot()
+    stops = [
+        DemandNode(
+            demand_id="near-1",
+            org_id="org-1",
+            location=GeoPoint(lat=37.7849, lon=-122.4094),
+            demand_units=2,
+        ),
+        DemandNode(
+            demand_id="far-1",
+            org_id="org-1",
+            location=GeoPoint(lat=37.4419, lon=-122.1430),
+            demand_units=2,
+        ),
+    ]
+    vehicles = [
+        VehicleSpec(vehicle_id="short-range", capacity=10, max_distance_km=10.0),
+        VehicleSpec(vehicle_id="long-range", capacity=10, max_distance_km=150.0),
+    ]
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=vehicles,
+        stops=stops,
+        time_limit_seconds=3,
+    )
+
+    response = optimize_dispatch(request, depot)
+    assert response.geometrically_valid is True
+    assert response.capacity_valid is True
+
+    by_vehicle = {r.vehicle_id: r for r in response.routes}
+    if "short-range" in by_vehicle:
+        assert by_vehicle["short-range"].total_distance_km <= 10.0
+    assert "long-range" in by_vehicle
+    assert any(s.demand_id == "far-1" for s in by_vehicle["long-range"].stops)
+
+
+def test_optimize_dispatch_infeasible_capacity() -> None:
+    depot = _make_depot()
+    stops = _make_clustered_stops()  # total demand = 21
+    vehicles = [
+        VehicleSpec(vehicle_id="veh-1", capacity=10),
+        VehicleSpec(vehicle_id="veh-2", capacity=10),
+    ]
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=vehicles,
+        stops=stops,
+    )
+
+    with pytest.raises(SolverInfeasibleError, match="exceeds total fleet capacity"):
+        optimize_dispatch(request, depot)
+
+
+def test_optimize_dispatch_tenant_isolation_depot_mismatch() -> None:
+    depot = _make_depot(org_id="org-other")
+    stops = _make_clustered_stops(org_id="org-1")
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=[VehicleSpec(vehicle_id="veh-1", capacity=50)],
+        stops=stops,
+    )
+
+    with pytest.raises(TenantIsolationError):
+        optimize_dispatch(request, depot)
+
+
+def test_optimize_dispatch_tenant_isolation_stop_mismatch() -> None:
+    depot = _make_depot(org_id="org-1")
+    stops = _make_clustered_stops(org_id="org-1")
+    stops[2] = DemandNode(
+        demand_id="rogue-stop",
+        org_id="org-2",
+        location=GeoPoint(lat=37.8, lon=-122.4),
+        demand_units=1,
+    )
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=[VehicleSpec(vehicle_id="veh-1", capacity=50)],
+        stops=stops,
+    )
+
+    with pytest.raises(TenantIsolationError):
+        optimize_dispatch(request, depot)
+
+
+def test_optimize_dispatch_depot_facility_id_mismatch() -> None:
+    depot = _make_depot(facility_id="depot-oak")
+    stops = _make_clustered_stops()
+    request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=[VehicleSpec(vehicle_id="veh-1", capacity=50)],
+        stops=stops,
+    )
+
+    with pytest.raises(SpatialGridError):
+        optimize_dispatch(request, depot)
+
+
+def test_ortools_beats_naive_llm_guess_on_distance_and_validity() -> None:
+    depot = _make_depot()
+    # With capacities [13, 8], naive round-robin puts load 8 on veh-1 and 13 on veh-2,
+    # violating veh-2's capacity of 8.
+    stops = _make_clustered_stops()
+    tight_vehicles = [
+        VehicleSpec(vehicle_id="veh-1", capacity=13),
+        VehicleSpec(vehicle_id="veh-2", capacity=8),
+    ]
+    tight_request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=tight_vehicles,
+        stops=stops,
+        time_limit_seconds=3,
+    )
+
+    ortools_resp = optimize_dispatch(tight_request, depot)
+    naive_routes = naive_llm_guess_dispatch(tight_request, depot)
+    naive_geom_valid, naive_cap_valid = validate_dispatch_solution(naive_routes, stops)
+
+    assert ortools_resp.geometrically_valid is True
+    assert ortools_resp.capacity_valid is True
+    assert naive_geom_valid is True
+    assert naive_cap_valid is False
+
+    # Also compare on distance when capacities are equal (15 each)
+    # Reorder stops so round-robin crisscrosses north and south on both vehicles
+    crisscross_stops = [stops[0], stops[2], stops[1], stops[3], stops[4], stops[5]]
+    equal_request = OptimizeDispatchRequest(
+        org_id="org-1",
+        depot_facility_id="depot-sf",
+        vehicles=[
+            VehicleSpec(vehicle_id="veh-1", capacity=15),
+            VehicleSpec(vehicle_id="veh-2", capacity=15),
+        ],
+        stops=crisscross_stops,
+        time_limit_seconds=3,
+    )
+    ortools_eq = optimize_dispatch(equal_request, depot)
+    naive_eq = naive_llm_guess_dispatch(equal_request, depot)
+    naive_eq_dist = sum(r.total_distance_km for r in naive_eq)
+    assert ortools_eq.total_distance_km < naive_eq_dist
+
+    nn_routes = nearest_neighbor_heuristic(equal_request, depot)
+    nn_geom_valid, nn_cap_valid = validate_dispatch_solution(nn_routes, crisscross_stops)
+    assert nn_geom_valid is True
+    assert nn_cap_valid is True
+    nn_dist = sum(r.total_distance_km for r in nn_routes)
+    assert ortools_eq.total_distance_km <= nn_dist + 1e-6
